@@ -9,6 +9,7 @@ import torch
 from ultralytics.models.yolo.detect import DetectionValidator
 from ultralytics.utils import LOGGER, ops
 from ultralytics.utils.metrics import OBBMetrics, batch_probiou
+from ultralytics.utils.nms import TorchNMS
 
 
 class OBBValidator(DetectionValidator):
@@ -176,7 +177,8 @@ class OBBValidator(DetectionValidator):
             (x, y, w, h, angle) and polygon format (x1, y1, x2, y2, x3, y3, x4, y4) before adding them
             to the JSON dictionary.
         """
-        stem = Path(pbatch["im_file"]).stem
+        path = Path(pbatch["im_file"])
+        stem = path.stem
         image_id = int(stem) if stem.isnumeric() else stem
         rbox = predn["bboxes"]
         poly = ops.xywhr2xyxyxyxy(rbox).view(-1, 8)
@@ -184,6 +186,7 @@ class OBBValidator(DetectionValidator):
             self.jdict.append(
                 {
                     "image_id": image_id,
+                    "file_name": path.name,
                     "category_id": self.class_map[int(c)],
                     "score": round(s, 5),
                     "rbox": [round(x, 3) for x in r],
@@ -279,7 +282,7 @@ class OBBValidator(DetectionValidator):
                 b = bbox[:, :5].clone()
                 b[:, :2] += c
                 # 0.3 could get results close to the ones from official merging script, even slightly better.
-                i = ops.nms_rotated(b, scores, 0.3)
+                i = TorchNMS.fast_nms(b, scores, 0.3, iou_func=batch_probiou)
                 bbox = bbox[i]
 
                 b = ops.xywhr2xyxyxyxy(bbox[:, :5]).view(-1, 8)

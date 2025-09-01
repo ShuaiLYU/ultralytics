@@ -9,7 +9,7 @@ import torch
 
 from ultralytics.data import build_dataloader, build_yolo_dataset, converter
 from ultralytics.engine.validator import BaseValidator
-from ultralytics.utils import LOGGER, ops
+from ultralytics.utils import LOGGER, nms, ops
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
 from ultralytics.utils.plotting import plot_images
@@ -115,7 +115,7 @@ class DetectionValidator(BaseValidator):
             (List[Dict[str, torch.Tensor]]): Processed predictions after NMS, where each dict contains
                 'bboxes', 'conf', 'cls', and 'extra' tensors.
         """
-        outputs = ops.non_max_suppression(
+        outputs = nms.non_max_suppression(
             preds,
             self.args.conf,
             self.args.iou,
@@ -372,8 +372,18 @@ class DetectionValidator(BaseValidator):
             predn (Dict[str, torch.Tensor]): Predictions dictionary containing 'bboxes', 'conf', and 'cls' keys
                 with bounding box coordinates, confidence scores, and class predictions.
             pbatch (Dict[str, Any]): Batch dictionary containing 'imgsz', 'ori_shape', 'ratio_pad', and 'im_file'.
+
+        Examples:
+             >>> result = {
+             ...     "image_id": 42,
+             ...     "file_name": "42.jpg",
+             ...     "category_id": 18,
+             ...     "bbox": [258.15, 41.29, 348.26, 243.78],
+             ...     "score": 0.236,
+             ... }
         """
-        stem = Path(pbatch["im_file"]).stem
+        path = Path(pbatch["im_file"])
+        stem = path.stem
         image_id = int(stem) if stem.isnumeric() else stem
         box = ops.xyxy2xywh(predn["bboxes"])  # xywh
         box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
@@ -381,6 +391,7 @@ class DetectionValidator(BaseValidator):
             self.jdict.append(
                 {
                     "image_id": image_id,
+                    "file_name": path.name,
                     "category_id": self.class_map[int(c)],
                     "bbox": [round(x, 3) for x in b],
                     "score": round(s, 5),

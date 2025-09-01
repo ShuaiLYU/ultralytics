@@ -19,7 +19,6 @@ from ultralytics.nn.autobackend import check_class_names
 from ultralytics.utils import (
     DATASETS_DIR,
     LOGGER,
-    MACOS,
     NUM_THREADS,
     ROOT,
     SETTINGS_FILE,
@@ -37,7 +36,6 @@ from ultralytics.utils.ops import segments2boxes
 HELP_URL = "See https://docs.ultralytics.com/datasets for dataset formatting guidance."
 IMG_FORMATS = {"bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp", "pfm", "heic"}  # image suffixes
 VID_FORMATS = {"asf", "avi", "gif", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "wmv", "webm"}  # video suffixes
-PIN_MEMORY = str(os.getenv("PIN_MEMORY", not MACOS)).lower() == "true"  # global pin_memory for dataloaders
 FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
 
 
@@ -68,7 +66,7 @@ def check_file_speeds(
         >>> image_files = list(Path("dataset/images").glob("*.jpg"))
         >>> check_file_speeds(image_files, threshold_ms=15)
     """
-    if not files or len(files) == 0:
+    if not files:
         LOGGER.warning(f"{prefix}Image speed checks: No files to check")
         return
 
@@ -347,8 +345,13 @@ def polygons2masks_overlap(
     )
     areas = []
     ms = []
-    for si in range(len(segments)):
-        mask = polygon2mask(imgsz, [segments[si].reshape(-1)], downsample_ratio=downsample_ratio, color=1)
+    for segment in segments:
+        mask = polygon2mask(
+            imgsz,
+            [segment.reshape(-1)],
+            downsample_ratio=downsample_ratio,
+            color=1,
+        )
         ms.append(mask.astype(masks.dtype))
         areas.append(mask.sum())
     areas = np.asarray(areas)
@@ -466,7 +469,7 @@ def check_det_dataset(dataset: str, autodownload: bool = True) -> Dict[str, Any]
                 safe_download(url=s, dir=DATASETS_DIR, delete=True)
             elif s.startswith("bash "):  # bash script
                 LOGGER.info(f"Running {s} ...")
-                r = os.system(s)
+                subprocess.run(s.split(), check=True)
             else:  # python script
                 exec(s, {"yaml": data})
             dt = f"({round(time.time() - t, 1)}s)"
@@ -511,7 +514,7 @@ def check_cls_dataset(dataset: Union[str, Path], split: str = "") -> Dict[str, A
         LOGGER.warning(f"Dataset not found, missing path {data_dir}, attempting download...")
         t = time.time()
         if str(dataset) == "imagenet":
-            subprocess.run(f"bash {ROOT / 'data/scripts/get_imagenet.sh'}", shell=True, check=True)
+            subprocess.run(["bash", str(ROOT / "data/scripts/get_imagenet.sh")], check=True)
         else:
             url = f"https://github.com/ultralytics/assets/releases/download/v0.0.0/{dataset}.zip"
             download(url, dir=data_dir.parent)
@@ -519,8 +522,7 @@ def check_cls_dataset(dataset: Union[str, Path], split: str = "") -> Dict[str, A
     train_set = data_dir / "train"
     if not train_set.is_dir():
         LOGGER.warning(f"Dataset 'split=train' not found at {train_set}")
-        image_files = list(data_dir.rglob("*.jpg")) + list(data_dir.rglob("*.png"))
-        if image_files:
+        if image_files := list(data_dir.rglob("*.jpg")) + list(data_dir.rglob("*.png")):
             from ultralytics.data.split import split_classify_dataset
 
             LOGGER.info(f"Found {len(image_files)} images in subdirectories. Attempting to split...")

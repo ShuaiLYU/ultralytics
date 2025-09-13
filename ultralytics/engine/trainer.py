@@ -387,6 +387,7 @@ class BaseTrainer:
                 pbar = TQDM(enumerate(self.train_loader), total=nb)
             self.tloss = None
             for i, batch in pbar:
+                if i>3:break
                 self.run_callbacks("on_train_batch_start")
                 # Warmup
                 ni = i + nb * epoch
@@ -413,11 +414,11 @@ class BaseTrainer:
                     )
 
                 # Backward
-                self.scaler.scale(self.loss).backward()
+                # self.scaler.scale(self.loss).backward()
 
                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
                 if ni - last_opt_step >= self.accumulate:
-                    self.optimizer_step()
+                    # self.optimizer_step()
                     last_opt_step = ni
 
                     # Timed stopping

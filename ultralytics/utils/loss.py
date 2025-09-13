@@ -819,8 +819,8 @@ class TVPDetectLoss:
         """Extract visual-prompt features from the model output."""
         vnc = feats[0].shape[1] - self.ori_reg_max * 4 - self.ori_nc
 
-        self.vp_criterion.nc = vnc
-        self.vp_criterion.no = vnc + self.vp_criterion.reg_max * 4
+        self.vp_criterion.nc = vnc #14
+        self.vp_criterion.no = vnc + self.vp_criterion.reg_max * 4 #78
         self.vp_criterion.assigner.num_classes = vnc
 
         return [

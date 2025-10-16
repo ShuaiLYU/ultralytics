@@ -188,8 +188,9 @@ class YOLOETrainerFromScratch(YOLOETrainer, WorldTrainerFromScratch):
             (YOLOConcatDataset | Dataset): The constructed dataset for training or validation.
         """
         return WorldTrainerFromScratch.build_dataset(self, img_path, mode, batch)
+    
 
-    def generate_text_embeddings(self, texts: list[str], batch: int, cache_dir: Path):
+    def generate_text_embeddings(self, texts: list[str], batch: int, cache_dir: Path) -> dict[str, torch.Tensor]:
         """
         Generate text embeddings for a list of text samples.
 
@@ -199,10 +200,9 @@ class YOLOETrainerFromScratch(YOLOETrainer, WorldTrainerFromScratch):
             cache_dir (Path): Directory to save/load cached embeddings.
 
         Returns:
-            (dict): Dictionary mapping text samples to their embeddings.
+            (dict[str, torch.Tensor]): Dictionary mapping text samples to their embeddings.
         """
-        # model = "mobileclip:blt"
-        model=unwrap_model(self.model).args.clip_weight_name
+        model = unwrap_model(self.model).args.clip_weight_name
         cache_path = cache_dir / f"text_embeddings_{model.replace(':', '_').replace('/', '_')}.pt"
         if cache_path.exists():
             LOGGER.info(f"Reading existed cache from '{cache_path}'")
@@ -211,10 +211,12 @@ class YOLOETrainerFromScratch(YOLOETrainer, WorldTrainerFromScratch):
                 return txt_map
         LOGGER.info(f"Caching text embeddings to '{cache_path}'")
         assert self.model is not None
-        txt_feats = unwrap_model(self.model).get_text_pe(texts, batch, without_reprta=True, cache_clip_model=False)
+        txt_feats = unwrap_model(self.model).get_text_pe(texts, batch, cache_clip_model=False)
         txt_map = dict(zip(texts, txt_feats.squeeze(0)))
         torch.save(txt_map, cache_path)
         return txt_map
+
+
 
 
 class YOLOEPEFreeTrainer(YOLOEPETrainer, YOLOETrainerFromScratch):

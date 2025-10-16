@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import itertools
+import random
 from pathlib import Path
 from typing import Any
 
 import torch
-import random
 
 from ultralytics.data import build_yolo_dataset
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.nn.tasks import WorldModel
+from ultralytics.nn.text_model import build_text_model
 from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK
 from ultralytics.utils.torch_utils import unwrap_model
 
@@ -69,6 +70,7 @@ class WorldTrainer(DetectionTrainer):
         super().__init__(cfg, overrides, _callbacks)
         self.text_embeddings = None
         self.article = ["the", "a", "an", "one", "some", "any", "this", "that"]
+        self._text_model = None
 
     def get_model(self, cfg=None, weights: str | None = None, verbose: bool = True) -> WorldModel:
         """
@@ -154,7 +156,7 @@ class WorldTrainer(DetectionTrainer):
         Returns:
             (dict[str, torch.Tensor]): Dictionary mapping text samples to their embeddings.
         """
-        model = "clip:ViT-B/32"
+        model = unwrap_model(self.model).args.clip_weight_name
         cache_path = cache_dir / f"text_embeddings_{model.replace(':', '_').replace('/', '_')}.pt"
         if cache_path.exists():
             LOGGER.info(f"Reading existed cache from '{cache_path}'")
@@ -162,11 +164,37 @@ class WorldTrainer(DetectionTrainer):
             if sorted(txt_map.keys()) == sorted(texts):
                 return txt_map
         LOGGER.info(f"Caching text embeddings to '{cache_path}'")
-        assert self.model is not None
-        txt_feats = unwrap_model(self.model).get_text_pe(texts, batch, cache_clip_model=False)
+        txt_feats = self._encode_texts(texts, batch_size=batch)
         txt_map = dict(zip(texts, txt_feats.squeeze(0)))
         torch.save(txt_map, cache_path)
         return txt_map
+
+
+    def _encode_texts(self, texts: list[str], batch_size: int | None = None) -> torch.Tensor:
+        """Encode a list of texts into CLIP embeddings without registering the encoder on the model."""
+        if not texts:
+            raise ValueError("Expected at least one text sample to encode.")
+
+        model = unwrap_model(self.model)
+        if model is None:
+            raise RuntimeError("Model must be initialized before requesting text embeddings.")
+
+        device = next(model.parameters()).device
+        clip_weight_name = model.args.clip_weight_name
+        if batch_size is None or batch_size <= 0:
+            batch_size = len(texts)
+
+        if self._text_model is None or getattr(self._text_model, "device", None) != device:
+            self._text_model = build_text_model(clip_weight_name, device=device)
+
+        text_model = self._text_model
+        tokens = text_model.tokenize(texts)
+        feats = []
+        for chunk in tokens.split(batch_size):
+            feats.append(text_model.encode_text(chunk).detach().clone())
+
+        txt_feats = feats[0] if len(feats) == 1 else torch.cat(feats, dim=0)
+        return txt_feats.reshape(1, len(texts), txt_feats.shape[-1])
 
     def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
         """Preprocess a batch of images and text for YOLOWorld training."""
@@ -174,14 +202,15 @@ class WorldTrainer(DetectionTrainer):
 
         # Add text features
         texts = list(itertools.chain(*batch["texts"]))
+        if self.text_embeddings is None:
+            self.text_embeddings = {}
         for i, text in enumerate(texts):
             if " " in text:
                 continue
             texts[i] = f"{self.article[random.randint(0, len(self.article) - 1)]} {text}"
             if texts[i] not in self.text_embeddings:
-                self.text_embeddings[texts[i]] = (
-                    unwrap_model(self.model).get_text_pe([texts[i]], 1, cache_clip_model=True).squeeze()
-                )
+                embedding = self._encode_texts([texts[i]], batch_size=1).squeeze(0).squeeze(0).clone()
+                self.text_embeddings[texts[i]] = embedding
         txt_feats = torch.stack([self.text_embeddings[text] for text in texts]).to(
             self.device, non_blocking=self.device.type == "cuda"
         )

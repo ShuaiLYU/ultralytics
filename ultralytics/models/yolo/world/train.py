@@ -204,13 +204,14 @@ class WorldTrainer(DetectionTrainer):
         texts = list(itertools.chain(*batch["texts"]))
         if self.text_embeddings is None:
             self.text_embeddings = {}
-        for i, text in enumerate(texts):
-            if " " in text:
-                continue
-            texts[i] = f"{self.article[random.randint(0, len(self.article) - 1)]} {text}"
-            if texts[i] not in self.text_embeddings:
-                embedding = self._encode_texts([texts[i]], batch_size=1).squeeze(0).squeeze(0).clone()
-                self.text_embeddings[texts[i]] = embedding
+        # for i, text in enumerate(texts):
+
+        #     if " " in text:
+        #         continue
+        #     texts[i] = f"{self.article[random.randint(0, len(self.article) - 1)]} {text}"
+        #     if texts[i] not in self.text_embeddings:
+        #         embedding = self._encode_texts([texts[i]], batch_size=1).squeeze(0).squeeze(0).clone()
+        #         self.text_embeddings[texts[i]] = embedding
         txt_feats = torch.stack([self.text_embeddings[text] for text in texts]).to(
             self.device, non_blocking=self.device.type == "cuda"
         )

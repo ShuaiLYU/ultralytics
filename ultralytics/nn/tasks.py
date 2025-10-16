@@ -1024,7 +1024,12 @@ class YOLOEModel(DetectionModel):
         """
         from ultralytics.nn.text_model import build_text_model
 
-        clip_weight=self.args.clip_weight_name
+        try:
+            clip_weight=self.args["clip_weight_name"]
+        except:
+            clip_weight=self.args.clip_weight_name
+
+
 
         device = next(self.model.parameters()).device
         if not getattr(self, "clip_model", None) and cache_clip_model:

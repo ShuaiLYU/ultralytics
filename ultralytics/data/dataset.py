@@ -6,6 +6,7 @@ import json
 from collections import defaultdict
 from itertools import repeat
 from multiprocessing.pool import ThreadPool
+import os
 from pathlib import Path
 from typing import Any
 
@@ -458,7 +459,8 @@ class GroundingDataset(YOLODataset):
         self.max_samples = max_samples
         super().__init__(*args, task=task, data={"channels": 3}, **kwargs)
 
-        assert CACHE_SUFFIX in {".cache", ".merged.cache", ".updated.cache"}, f"cache_suffix must be either '.cache' or '.merged.cache', but got {CACHE_SUFFIX}"
+
+        assert CACHE_SUFFIX in {".cache", ".merged.cache", x}, f"cache_suffix must be either '.cache' or '.engine.cache', but got {CACHE_SUFFIX}"
 
     def get_img_files(self, img_path: str) -> list:
         """

@@ -755,6 +755,21 @@ class LRPCHead(nn.Module):
             )
 
 
+class NmsHead(nn.Module):
+
+    def __init__(self, embed):
+        super().__init__()
+        self.gate=nn.Sequential(nn.Conv2d(embed,embed,1),
+                             nn.Conv2d(embed,1,1),
+                             nn.Sigmoid())
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        
+        return self.gate(x)
+
+
+
 class YOLOEDetect(Detect):
     """
     Head for integrating YOLO detection models with semantic understanding from text embeddings.
@@ -820,7 +835,7 @@ class YOLOEDetect(Detect):
         self.cv4 = nn.ModuleList(BNContrastiveHead(embed) if with_bn else ContrastiveHead() for _ in ch)
         if end2end:
             self.one2one_cv3 = copy.deepcopy(self.cv3)  # overwrite with new cv3
-            self.one2one_cv4 = copy.deepcopy(self.cv4)
+            self.one2one_cv4= NmsHead( embed)
 
         self.reprta = Residual(SwiGLUFFN(embed, embed))
         self.savpe = SAVPE(ch, c3, embed)
@@ -936,21 +951,44 @@ class YOLOEDetect(Detect):
     @property
     def one2one(self):
         """Returns the one-to-one head components."""
-        return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3, contrastive_head=self.one2one_cv4)
+        return dict(box_head=self.cv2, cls_head=self.one2one_cv3, contrastive_head=self.one2one_cv4)
 
     def forward_head(self, x, box_head, cls_head, contrastive_head):
-        assert len(x) == 4, f"Expected 4 features including 3 feature maps and 1 text embeddings, but got {len(x)}."
-        if box_head is None or cls_head is None:  # for fused inference
-            return dict()
-        bs = x[0].shape[0]  # batch size
-        boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
-        self.nc = x[-1].shape[1]
-        scores = torch.cat(
-            [contrastive_head[i](cls_head[i](x[i]), x[-1]).reshape(bs, self.nc, -1) for i in range(self.nl)], dim=-1
-        )
-        self.no = self.nc + self.reg_max * 4  # self.nc could be changed when inference with different texts
-        return dict(boxes=boxes, scores=scores, feats=x[:3])
 
+        if not self.end2end:
+            assert len(x) == 4, f"Expected 4 features including 3 feature maps and 1 text embeddings, but got {len(x)}."
+            if box_head is None or cls_head is None:  # for fused inference
+                return dict()
+            bs = x[0].shape[0]  # batch size
+            boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
+            self.nc = x[-1].shape[1]
+            scores = torch.cat(
+                [contrastive_head[i](cls_head[i](x[i]), x[-1]).reshape(bs, self.nc, -1) for i in range(self.nl)], dim=-1
+            )
+            self.no = self.nc + self.reg_max * 4  # self.nc could be changed when inference with different texts
+            return dict(boxes=boxes, scores=scores, feats=x[:3])
+
+        else:
+            assert len(x) == 4, f"Expected 4 features including 3 feature maps and 1 text embeddings, but got {len(x)}."
+            if box_head is None or cls_head is None:  # for fused inference
+                return dict()
+            bs = x[0].shape[0]  # batch size
+            boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
+            self.nc = x[-1].shape[1]
+
+            num_scores = torch.cat(
+                [contrastive_head[i](cls_head[i](x[i]), x[-1]).reshape(bs, self.nc, -1) for i in range(self.nl)], dim=-1
+            )
+            cls_head=self.cv3
+            contrastive_head=self.cv4   
+            scores= torch.cat(
+                [contrastive_head[i](cls_head[i](x[i]), x[-1]).reshape(bs, self.nc, -1) for i in range(self.nl)], dim=-1
+            )
+            scores=scores*num_scores
+
+
+            self.no = self.nc + self.reg_max * 4  # self.nc could be changed when inference with different texts
+            return dict(boxes=boxes, scores=scores, feats=x[:3])
     def bias_init(self):
         """Initialize Detect() biases, WARNING: requires stride availability."""
         for i, (a, b, c) in enumerate(

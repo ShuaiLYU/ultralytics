@@ -820,8 +820,8 @@ class BNContrastiveHead(nn.Module):
             embed_dims (int): Embedding dimensions for features.
         """
         super().__init__()
-        # self.norm = nn.BatchsNorm2d(embed_dims)
-        self.norm= nn.LayerNorm(embed_dims)
+        self.norm = nn.BatchNorm2d(embed_dims)
+        # self.norm= nn.LayerNorm(embed_dims)
         # NOTE: use -10.0 to skeep the init cls loss consistency with other losses
         self.bias = nn.Parameter(torch.tensor([-10.0]))
         # use -1.0 is more stable
@@ -851,7 +851,7 @@ class BNContrastiveHead(nn.Module):
         """
         # ln 
         # x = self.norm(x)
-        x = self.norm(x.permute(0,2,3,1)).permute(0,3,1,2)
+        # x = self.norm(x.permute(0,2,3,1)).permute(0,3,1,2)
         w = F.normalize(w, dim=-1, p=2)
 
         x = torch.einsum("bchw,bkc->bkhw", x, w)

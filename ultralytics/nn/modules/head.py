@@ -756,16 +756,23 @@ class LRPCHead(nn.Module):
 
 
 class NmsHead(nn.Module):
+    """
+    bchw,bkc->bkhw
+    
+    """
 
-    def __init__(self, embed):
+    def __init__(self, embed: int):
         super().__init__()
-        self.gate=nn.Sequential(nn.Conv2d(embed,embed,1),
-                             nn.Conv2d(embed,1,1),
-                             nn.Sigmoid())
+        # Expose final conv separately so bias_init can access .bias
+        self.conv1 = nn.Conv2d(embed, embed, 1, bias=True)
+        self.out_conv = nn.Conv2d(embed, 1, 1, bias=True)
+        self.gate = nn.Sequential(self.conv1, self.out_conv, nn.Sigmoid())
+        # Make bias visible at module level for Detect.bias_init compatibility
+        self.bias = self.out_conv.bias
 
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        
+    def forward(self, x: torch.Tensor, cls_embed: torch.Tensor) -> torch.Tensor:
+        # cls_embed is unused for simple gating; keep signature for API parity
         return self.gate(x)
 
 
@@ -835,7 +842,7 @@ class YOLOEDetect(Detect):
         self.cv4 = nn.ModuleList(BNContrastiveHead(embed) if with_bn else ContrastiveHead() for _ in ch)
         if end2end:
             self.one2one_cv3 = copy.deepcopy(self.cv3)  # overwrite with new cv3
-            self.one2one_cv4= NmsHead( embed)
+            self.one2one_cv4=nn.ModuleList(  NmsHead( embed) for _ in ch )
 
         self.reprta = Residual(SwiGLUFFN(embed, embed))
         self.savpe = SAVPE(ch, c3, embed)
@@ -955,7 +962,7 @@ class YOLOEDetect(Detect):
 
     def forward_head(self, x, box_head, cls_head, contrastive_head):
 
-        if not self.end2end:
+        if  isinstance(contrastive_head[0], BNContrastiveHead):
             assert len(x) == 4, f"Expected 4 features including 3 feature maps and 1 text embeddings, but got {len(x)}."
             if box_head is None or cls_head is None:  # for fused inference
                 return dict()
@@ -969,6 +976,7 @@ class YOLOEDetect(Detect):
             return dict(boxes=boxes, scores=scores, feats=x[:3])
 
         else:
+            assert isinstance(contrastive_head[0], NmsHead), "Expected NmsHead in contrastive_head for non-BNContrastiveHead case."
             assert len(x) == 4, f"Expected 4 features including 3 feature maps and 1 text embeddings, but got {len(x)}."
             if box_head is None or cls_head is None:  # for fused inference
                 return dict()
@@ -977,14 +985,14 @@ class YOLOEDetect(Detect):
             self.nc = x[-1].shape[1]
 
             num_scores = torch.cat(
-                [contrastive_head[i](cls_head[i](x[i]), x[-1]).reshape(bs, self.nc, -1) for i in range(self.nl)], dim=-1
+                [contrastive_head[i](cls_head[i](x[i]), x[-1]).reshape(bs, 1, -1) for i in range(self.nl)], dim=-1
             )
             cls_head=self.cv3
             contrastive_head=self.cv4   
-            scores= torch.cat(
+            scores = torch.cat(
                 [contrastive_head[i](cls_head[i](x[i]), x[-1]).reshape(bs, self.nc, -1) for i in range(self.nl)], dim=-1
             )
-            scores=scores*num_scores
+            scores = scores * num_scores
 
 
             self.no = self.nc + self.reg_max * 4  # self.nc could be changed when inference with different texts

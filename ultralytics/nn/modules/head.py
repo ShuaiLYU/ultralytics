@@ -1011,7 +1011,8 @@ class YOLOEDetect(Detect):
             ):
                 a[-1].bias.data[:] = 2.0  # box
                 b[-1].bias.data[:] = 0.0
-                c.bias.data[:] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
+                # c.bias.data[:] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
+                c.bias.data[:]=10.0
 
 
 class YOLOESegment(YOLOEDetect):

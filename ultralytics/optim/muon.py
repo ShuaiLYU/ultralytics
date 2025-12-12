@@ -216,7 +216,7 @@ class MuSGD(optim.Optimizer):
                 for i, p in enumerate(group["params"]):
                     lr = (
                         group["lr"] * self.cls_w
-                        if group["param_names"] is not None
+                        if  "param_names" in group.keys() and group["param_names"] is not None
                         and bool(re.search(pattern, group["param_names"][i]))
                         # and "cv3" in group["param_names"][i]
                         # and "23" in group["param_names"][i]
@@ -253,7 +253,7 @@ class MuSGD(optim.Optimizer):
                 for i, p in enumerate(group["params"]):
                     lr = (
                         group["lr"] * self.cls_w
-                        if group["param_names"] is not None
+                        if "param_names" in group.keys() and  group["param_names"] is not None
                         and bool(re.search(pattern, group["param_names"][i]))
                         # and "cv3" in group["param_names"][i]
                         # and "23" in group["param_names"][i]

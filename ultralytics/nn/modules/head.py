@@ -1223,6 +1223,49 @@ class YOLOESegment(YOLOEDetect):
         return torch.cat([boxes, scores, conf, mask_coefficient], dim=-1)
 
 
+class YOLOESegment26(YOLOESegment):
+
+    def __init__(
+        self,
+        nc: int = 80,
+        nm: int = 32,
+        npr: int = 256,
+        embed: int = 512,
+        with_bn: bool = False,
+        reg_max=16,
+        end2end=False,
+        ch: tuple = (),
+    ):
+        YOLOEDetect.__init__(self,nc, embed, with_bn, reg_max, end2end, ch)
+        self.nm = nm
+        self.npr = npr
+        # self.proto = Proto(ch[0], self.npr, self.nm)
+        self.proto = Proto26(ch, self.npr, self.nm, nc)  # protos
+
+        c5 = max(ch[0] // 4, self.nm)
+        self.cv5 = nn.ModuleList(nn.Sequential(Conv(x, c5, 3), Conv(c5, c5, 3), nn.Conv2d(c5, self.nm, 1)) for x in ch)
+        if end2end:
+            self.one2one_cv5 = copy.deepcopy(self.cv5)
+
+    def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor] | dict[str, torch.Tensor]:
+        """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
+        outputs = Detect.forward(self, x)
+        preds = outputs[1] if isinstance(outputs, tuple) else outputs
+        proto = self.proto(x)  # mask protos
+        if isinstance(preds, dict):  # training and validating during training
+            if self.end2end:
+                preds["one2many"]["proto"] = proto
+                if isinstance(proto, tuple):
+                    preds["one2one"]["proto"] = tuple(p.detach() for p in proto)
+                else:
+                    preds["one2one"]["proto"] = proto.detach()
+            else:
+                preds["proto"] = proto
+        if self.training:
+            return preds
+        return (outputs, proto) if self.export else ((outputs[0], proto), preds)
+
+
 class RTDETRDecoder(nn.Module):
     """
     Real-Time Deformable Transformer Decoder (RTDETRDecoder) module for object detection.

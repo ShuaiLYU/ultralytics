@@ -103,6 +103,40 @@ semseg_loss=False
 
 
 
+# project_dir=runs/yoloe26s_tp_seg_ultra6
+# weight_path="yolo26s-objv1.pt"
+# trainer="YOLOESegTrainerFromScratch"
+# model=26s-seg
+# epo=30
+# close_mosaic=2
+# batch_size=128
+# ag=True
+
+# clip_weight_name="mobileclip2:b" # mobileclip2b
+# ptw="object365v1" 
+
+
+# optimizer="MuSGD"
+# lr0=0.00125
+# lrf=0.5
+# momentum=0.9
+# weight_decay=0.0007
+# o2m=0.1
+
+# semseg_loss=False
+
+# exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segseg${semseg_loss}_vpseg
+# device=0,1
+
+# using the following command to check the log:\n tail -f -n 50 ./runs/20251212_080224.log
+# Current screen: 2203801.train
+# exp name: mobileclip2:b_26s-seg_bs128_epo30_close2_opMuSGD_o2m0.1_segsegFalse_vpseg7
+
+
+###############################################default args #######################################
+
+
+
 project_dir=runs/yoloe26s_tp_seg_ultra6
 weight_path="yolo26s-objv1.pt"
 trainer="YOLOESegTrainerFromScratch"
@@ -125,12 +159,14 @@ o2m=0.1
 
 semseg_loss=False
 
-exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segseg${semseg_loss}_vpseg
-device=0,1
+exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segseg${semseg_loss}_segment26_tp 
+device=4,5
 
-# using the following command to check the log:\n tail -f -n 50 ./runs/20251212_080224.log
+
+# using the following command to check the log:\n tail -f -n 50 ./runs/20251215_031349.log
 # Current screen: 2203801.train
-# exp name: mobileclip2:b_26s-seg_bs128_epo30_close2_opMuSGD_o2m0.1_segsegFalse_vpseg7
+# exp name: mobileclip2:b_26s-seg_bs128_epo30_close2_opMuSGD_o2m0.1_segsegFalse_segment26_tp
+
  ##############################################################################################
 pyfile=ultralytics/finetune_yoloe26.py
 

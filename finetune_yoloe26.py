@@ -26,7 +26,7 @@ parser.add_argument("--close_mosaic", type=int, default=0)
 parser.add_argument("--batch", type=int, default=32)
 parser.add_argument("--project", type=str, default="../runs/train_tp")
 #device
-parser.add_argument("--device", type=str, default="7")
+parser.add_argument("--device", type=str, default="0,1")
 # val
 parser.add_argument("--val", type=str, default="True", choices=["True", "False"])
 parser.add_argument("--name", type=str, default="yoloe_vp")

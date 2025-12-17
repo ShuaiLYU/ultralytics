@@ -132,6 +132,7 @@ else:
 
 
 ###################################################################
+# args.device="7"
 # args.trainer="YOLOESegTrainerFromScratch"
 # args.project="runs/quick_verfiy"
 # args.model_version="26s-seg"

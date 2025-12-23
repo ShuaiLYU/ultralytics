@@ -7,7 +7,7 @@ print("set workspace:", workspace)
 
 from ultralytics import YOLOE,YOLO
 from ultralytics.models.yolo.yoloe import YOLOETrainerFromScratch,YOLOEVPTrainer,YOLOEPEFreeTrainer
-from ultralytics.models.yolo.yoloe import YOLOESegTrainerFromScratch
+from ultralytics.models.yolo.yoloe import YOLOESegTrainerFromScratch,YOLOESegTrainerSegHead
 
 
 
@@ -60,8 +60,8 @@ args = parser.parse_args()
 args.val = args.val == "True"
 args.ag = args.ag == "True"
 args.semseg_loss = args.semseg_loss == "True"
-assert args.trainer in ["YOLOETrainerFromScratch","YOLOEVPTrainer","YOLOEPEFreeTrainer","YOLOESegTrainerFromScratch"], \
-    "trainer must be YOLOETrainerFromScratch, YOLOEVPTrainer, YOLOEPEFreeTrainer, or YOLOESegTrainerFromScratch"
+assert args.trainer in ["YOLOETrainerFromScratch","YOLOEVPTrainer","YOLOEPEFreeTrainer","YOLOESegTrainerFromScratch","YOLOESegTrainerSegHead"], \
+    "trainer must be YOLOETrainerFromScratch, YOLOEVPTrainer, YOLOEPEFreeTrainer, YOLOESegTrainerFromScratch, or YOLOESegTrainerSegHead"
 
 
 
@@ -195,11 +195,31 @@ elif args.trainer == "YOLOEPEFreeTrainer":
             f"{head_index}.one2one_cv3.1.1",
             f"{head_index}.one2one_cv3.2.0",
             f"{head_index}.one2one_cv3.2.1",
-        ]
-    )
-
+        ])
     refer_data=None
     single_cls=True
+
+
+elif args.trainer=="YOLOESegTrainerSegHead":
+
+    print("Using YOLOESegTrainerSegHead for training.")
+    # reinit the model.model.savpe.
+    # freeze every layer except of the savpe module.
+    head_index = len(model.model.model) - 1
+    train_layers=[]
+    freeze = list(range(0, head_index))
+    for name, child in model.model.model[-1].named_children():
+        print("name:", name)
+
+        if ("cv5" not in name) and ("one2one_cv5" not in name) and ("proto" not in name):
+            freeze.append(f"{head_index}.{name}")
+        else:
+            train_layers.append(f"{head_index}.{name}")
+
+    refer_data=None
+    single_cls=False
+
+
 else:
     print("trainer_class:", args.trainer)
     raise ValueError("trainer_class must be YOLOETrainerFromScratch or YOLOEVPTrainer")

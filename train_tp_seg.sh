@@ -226,41 +226,9 @@ semseg_loss=False
 #  exp name: mobileclip2:b_26s-seg_bs128_epo30_close2_opMuSGD_o2m0.1_segsegFalse_segment26_mdata1_detachedproto_tp
 
 ############################################### train only the seg head #######################################
-# project_dir=runs/yoloe26s_tp_seg_ultra6
-# weight_path="weights/yoloe-26s.pt"
-# trainer="YOLOESegTrainerSegHead"
-# model=26s-seg
-# epo=30
-# close_mosaic=2
-# batch_size=128
-# ag=True
-
-# clip_weight_name="mobileclip2:b" # mobileclip2b
-# ptw="object365v1" 
-
-
-# optimizer="MuSGD"
-# lr0=0.00125
-# lrf=0.5
-# momentum=0.9
-# weight_decay=0.0007
-# o2m=0.1
-
-# semseg_loss=False
-
-# exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segseg${semseg_loss}_segment26_mdata1_trainseghead_tp
-# device=0,1
-
-#  using the following command to check the log:
-#  tail -f -n 50 ./runs/20251223_082154.log
-#  Current screen: 1206388.train4
-#  exp name: mobileclip2:b_26s-seg_bs128_epo30_close2_opMuSGD_o2m0.1_segsegFalse_segment26_mdata1_trainseghead_tp
-
-
-############################################### train only the seg head #######################################
 project_dir=runs/yoloe26s_tp_seg_ultra6
 weight_path="weights/yoloe-26s.pt"
-trainer="YOLOESegTrainerFromScratch"
+trainer="YOLOESegTrainerSegHead"
 model=26s-seg
 epo=30
 close_mosaic=2
@@ -280,8 +248,40 @@ o2m=0.1
 
 semseg_loss=False
 
-exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segseg${semseg_loss}_segment_mdata1_tp
-device=2,3
+exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segseg${semseg_loss}_segment26_mdata1_trainseghead_tp
+device=4,5
+#  using the following command to check the log:
+#  tail -f -n 50 ./runs/20251224_020343.log
+#  Current screen: 117435.cuda45
+#  exp name: mobileclip2:b_26s-seg_bs128_epo30_close2_opMuSGD_o2m0.1_segsegFalse_segment26_mdata1_trainseghead_tp2
+
+
+
+############################################### train only the seg head #######################################
+# project_dir=runs/yoloe26s_tp_seg_ultra6
+# weight_path="weights/yoloe-26s.pt"
+# trainer="YOLOESegTrainerFromScratch"
+# model=26s-seg
+# epo=30
+# close_mosaic=2
+# batch_size=128
+# ag=True
+
+# clip_weight_name="mobileclip2:b" # mobileclip2b
+# ptw="object365v1" 
+
+
+# optimizer="MuSGD"
+# lr0=0.00125
+# lrf=0.5
+# momentum=0.9
+# weight_decay=0.0007
+# o2m=0.1
+
+# semseg_loss=False
+
+# exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segseg${semseg_loss}_segment_mdata1_tp
+# device=2,3
 #  using the following command to check the log:
 #  tail -f -n 50 ./runs/20251224_020041.log
 #  Current screen: 115866.cuda23

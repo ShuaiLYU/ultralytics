@@ -309,7 +309,7 @@ class Segment(Detect):
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
         outputs = super().forward(x)
         preds = outputs[1] if isinstance(outputs, tuple) else outputs
-        proto = self.proto(x[0])  # mask protos
+        proto = self.proto(x[0].detach())  # mask protos
         if isinstance(preds, dict):  # training and validating during training
             if self.end2end:
                 preds["one2many"]["proto"] = proto

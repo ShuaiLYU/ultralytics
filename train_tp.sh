@@ -167,6 +167,43 @@ mkdir -p $project_dir
 # using the following command to check the log:\n tail -f -n 50 ./runs/20251216_062128.log
 # Current screen: 359138.train2
 # exp name: mobileclip2:b_26s_bs128_epo30_close2_opMuSGD_o2m0.1_maskdata_tp
+
+
+###############################################default args #######################################
+
+
+
+project_dir=runs/yoloe26s_tp_ultra6
+weight_path="yolo26s-objv1.pt"
+trainer="YOLOETrainerFromScratch"
+model=26s
+epo=30
+close_mosaic=2
+batch_size=128
+ag=True
+
+clip_weight_name="mobileclip2:b" # mobileclip2b
+ptw="object365v1" 
+
+
+optimizer="MuSGD"
+lr0=0.00125
+lrf=0.5
+momentum=0.9
+weight_decay=0.0007
+o2m=0.1
+
+copy_paste=0.15
+mixup=0.05
+
+exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_maskdata_tvp
+device=2,3
+
+# using the following command to check the log:
+# tail -f -n 50 ./runs/20251225_072637.log
+# Current screen: 326335.cuda23
+# exp name: mobileclip2:b_26s_bs128_epo30_close2_opMuSGD_o2m0.1_maskdata_tvp
+
 ###############################################default args #######################################
 
 
@@ -202,31 +239,31 @@ mkdir -p $project_dir
 
 
 
-project_dir=runs/yoloe26m_tp_ultra6
-weight_path="yolo26m-objv1.pt"
-trainer="YOLOETrainerFromScratch"
-model=26m
-epo=30
-close_mosaic=2
-batch_size=256
-ag=True
+# project_dir=runs/yoloe26m_tp_ultra6
+# weight_path="yolo26m-objv1.pt"
+# trainer="YOLOETrainerFromScratch"
+# model=26m
+# epo=30
+# close_mosaic=2
+# batch_size=256
+# ag=True
 
-clip_weight_name="mobileclip2:b" # mobileclip2b
-ptw="object365v1" 
+# clip_weight_name="mobileclip2:b" # mobileclip2b
+# ptw="object365v1" 
 
 
-optimizer="MuSGD"
-lr0=0.00125
-lrf=0.5
-momentum=0.9
-weight_decay=0.0005
-o2m=0.1
+# optimizer="MuSGD"
+# lr0=0.00125
+# lrf=0.5
+# momentum=0.9
+# weight_decay=0.0005
+# o2m=0.1
 
-copy_paste=0.15
-mixup=0.05
+# copy_paste=0.15
+# mixup=0.05
 
-exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_tp
-device=0,1
+# exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_tp
+# device=0,1
 
 # using the following command to check the log:
 # tail -f -n 50 ./runs/20251224_093848.log

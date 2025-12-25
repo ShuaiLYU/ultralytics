@@ -100,7 +100,7 @@ class YOLOETrainer(DetectionTrainer):
             (Dataset): YOLO dataset configured for training or validation.
         """
         self.load_vp = False
-        gs = max(int(de_parallel(self.model).stride.max() if self.model else 0), 32)
+        gs = max(int(unwrap_model(self.model).stride.max() if self.model else 0), 32)
         return build_yolo_dataset(
             self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=gs, multi_modal=mode == "train"
         )
@@ -179,10 +179,7 @@ class YOLOETrainerFromScratch(YOLOETrainer, WorldTrainerFromScratch):
 
     def build_dataset(self, img_path: list[str] | str, mode: str = "train", batch: int | None = None):
         """
-        Build YOLO Dataset for training or validation.
-
-        This method constructs appropriate datasets based on the mode and input paths, handling both
-        standard YOLO datasets and grounding datasets with different formats.
+        Build YOLO Dataset for training or validation with visual prompts.
 
         Args:
             img_path (list[str] | str): Path to the folder containing images or list of paths.
@@ -190,9 +187,15 @@ class YOLOETrainerFromScratch(YOLOETrainer, WorldTrainerFromScratch):
             batch (int, optional): Size of batches, used for rectangular training/validation.
 
         Returns:
-            (YOLOConcatDataset | Dataset): The constructed dataset for training or validation.
+            (Dataset): YOLO dataset configured for training or validation, with visual prompts for training mode.
         """
-        return WorldTrainerFromScratch.build_dataset(self, img_path, mode, batch)
+        dataset = WorldTrainerFromScratch.build_dataset(self, img_path, mode, batch)
+        if isinstance(dataset, YOLOConcatDataset):
+            for d in dataset.datasets:
+                d.transforms.append(LoadVisualPrompt())
+        else:
+            dataset.transforms.append(LoadVisualPrompt())
+        return dataset
 
     def generate_text_embeddings(self, texts: list[str], batch: int, cache_dir: Path):
         """

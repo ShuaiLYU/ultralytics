@@ -133,15 +133,21 @@ else:
 
 
 ###################################################################
-# args.trainer="YOLOESegTrainerFromScratch"
-# args.project="runs/quick_verfiy"
-# args.model_version="26s-seg"
-# data = dict(
-#     train=dict(
-#         yolo_data=["coco128-seg.yaml"]
-#     ),
-#     val=dict(yolo_data=[os.path.abspath("../datasets/lvis.yaml")]),
-# )
+args.trainer="YOLOETrainerFromScratch"
+args.project="runs/quick_verfiy"
+args.model_version="26s"
+Objects365v1="../datasets/Objects365v1.yaml"
+data = dict(
+    train=dict(
+        grounding_data=[
+                dict(
+                    img_path="../datasets/flickr/full_images/",
+                    json_file="../datasets/flickr/annotations/final_flickr_separateGT_train_segm.json",
+                )]
+    ),
+        val=dict(yolo_data=["../datasets/lvis.yaml"]),
+)
+args.batch=64
 
 ###################################################################
 model = YOLO("yoloe-{}.yaml".format(args.model_version))

@@ -1196,17 +1196,21 @@ class YOLOEModel(DetectionModel):
         Returns:
             (torch.Tensor): Class positional embeddings.
         """
-        all_pe = []
-        if tpe is not None:
-            assert tpe.ndim == 3
-            all_pe.append(tpe)
-        if vpe is not None:
+        if tpe is None and vpe is not None:
             assert vpe.ndim == 3
-            all_pe.append(vpe)
-        if not all_pe:
-            all_pe.append(getattr(self, "pe", torch.zeros(1, 80, 512)))
-        # for p in all_pe: print(p.shape)
-        return torch.cat(all_pe, dim=1)
+            return vpe
+        elif vpe is None and tpe is not None:
+            assert tpe.ndim == 3
+            return tpe
+        elif tpe is not None and vpe is not None:
+            assert tpe.ndim == 3
+            assert vpe.ndim == 3
+            assert tpe.shape == vpe.shape
+            return tpe*0.5 + vpe*0.5
+        else:
+            return torch.zeros(1,80,512)
+            print("Error: At least one of tpe and vpe should be given.")
+            # raise Exception("At least one of tpe and vpe should be given.")
 
     def predict(
         self, x, profile=False, visualize=False, tpe=None, augment=False, embed=None, vpe=None, return_vpe=False
@@ -1275,11 +1279,19 @@ class YOLOEModel(DetectionModel):
                 else self.init_criterion()
             )
 
+
         if preds is None:
+
+            mmt=True #  mulit-model training 
+            if mmt:
+                tpe=batch.get("txt_feats", None)
+                vpe=batch.get("visuals", None)
+            else:
+                tpe=batch.get("txt_feats", None)
+
+         
             preds = self.forward(
-                batch["img"],
-                tpe=None if "visuals" in batch else batch.get("txt_feats", None),
-                vpe=batch.get("visuals", None),
+                batch["img"],tpe=tpe,vpe=vpe,
             )
         return self.criterion(preds, batch)
 

@@ -322,63 +322,64 @@ semseg_loss=False
 #  exp name: mobileclip2:b_26s-seg_ptwyolo26s-objv1-seg_bs128_epo30_close2_opMuSGD_o2m0.1_segsegFalse_segment_mdata1_tp
 
 ############################################### train only the seg head #######################################
-# project_dir=runs/yoloe26s_tp_seg_ultra6
-# weight_path="weights/yolo26s-objv1-seg[foryoloe].pt"
-# ptw="yolo26s-objv1-seg" 
-
-# trainer="YOLOESegTrainerFromScratch"
-# model=26s-seg
-# epo=30
-# close_mosaic=2
-# batch_size=256
-# ag=True
-
-# clip_weight_name="mobileclip2:b" # mobileclip2b
-
-
-
-# optimizer="MuSGD"
-# lr0=0.00125
-# lrf=0.5
-# momentum=0.9
-# weight_decay=0.0007
-# o2m=0.1
-
-# semseg_loss=False
-
-# exp_name=${clip_weight_name}_${model}_ptw${ptw}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segment_engine1_tp
-# device=2,3
-
-# Command: python ultralytics_pro/finetune_yoloe26.py     --model_version 26s-seg     --lr0 0.00125     --lrf 0.5     --optimizer MuSGD     --momentum 0.9     --weight_decay 0.0007     --epochs 30     --close_mosaic 2     --batch 256     --device 2,3     --project runs/yoloe26s_tp_seg_ultra6     --name mobileclip2:b_26s-seg_ptwyolo26s-objv1-seg_bs256_epo30_close2_opMuSGD_o2m0.1_segment_engine1_tp     --clip_weight_name mobileclip2:b     --ag True     --o2m 0.1     --weight_path weights/yolo26s-objv1-seg[foryoloe].pt     --trainer YOLOESegTrainerFromScratch     --semseg_loss False 
-#  using the following command to check the log:
-#  tail -f -n 50 ./runs/20251226_093007.log
-#  Current screen: 
-#  exp name: mobileclip2:b_26s-seg_ptwyolo26s-objv1-seg_bs256_epo30_close2_opMuSGD_o2m0.1_segment_engine1_tp2
-
-############################################### train only the seg head #######################################
 project_dir=runs/yoloe26s_tp_seg_ultra6
-weight_path="weights/yoloe-26s.pt"
-ptw="yoloe26s"
-trainer="YOLOESegTrainerSegHead"
+weight_path="weights/yolo26s-objv1-seg[foryoloe].pt"
+ptw="yolo26s-objv1-seg" 
+
+trainer="YOLOESegTrainerFromScratch"
 model=26s-seg
 epo=30
 close_mosaic=2
-batch_size=128
+batch_size=255
 ag=True
 
 clip_weight_name="mobileclip2:b" # mobileclip2b
 
 
+
 optimizer="MuSGD"
-lr0=0.0025 # 0.00125
+lr0=0.00125
 lrf=0.5
 momentum=0.9
 weight_decay=0.0007
 o2m=0.1
 
 semseg_loss=False
-exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segment26_engine1_trainseghead_tp
-device=0,1
+
+exp_name=${clip_weight_name}_${model}_ptw${ptw}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segment_engine1_tp
+device=3,4,5
+
+#--------------------------------- Training Started ---------------------------------
+# Command: python ultralytics_pro/finetune_yoloe26.py     --model_version 26s-seg     --lr0 0.00125     --lrf 0.5     --optimizer MuSGD     --momentum 0.9     --weight_decay 0.0007     --epochs 30     --close_mosaic 2     --batch 255     --device 3,4,5     --project runs/yoloe26s_tp_seg_ultra6     --name mobileclip2:b_26s-seg_ptwyolo26s-objv1-seg_bs255_epo30_close2_opMuSGD_o2m0.1_segment_engine1_tp     --clip_weight_name mobileclip2:b     --ag True     --o2m 0.1     --weight_path weights/yolo26s-objv1-seg[foryoloe].pt     --trainer YOLOESegTrainerFromScratch     --semseg_loss False 
+#  using the following command to check the log:
+#  tail -f -n 50 ./runs/20251227_233445.log
+#  Current screen: 
+#  exp name: mobileclip2:b_26s-seg_ptwyolo26s-objv1-seg_bs255_epo30_close2_opMuSGD_o2m0.1_segment_engine1_tp2
+
+############################################### train only the seg head #######################################
+# project_dir=runs/yoloe26s_tp_seg_ultra6
+# weight_path="weights/yoloe-26s.pt"
+# ptw="yoloe26s"
+# trainer="YOLOESegTrainerSegHead"
+# model=26s-seg
+# epo=30
+# close_mosaic=2
+# batch_size=128
+# ag=True
+
+# clip_weight_name="mobileclip2:b" # mobileclip2b
+
+
+# optimizer="MuSGD"
+# lr0=0.0025 # 0.00125
+# lrf=0.5
+# momentum=0.9
+# weight_decay=0.0007
+# o2m=0.1
+
+# semseg_loss=False
+# exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segment26_engine1_trainseghead_tp
+# device=0,1
 
 # Command: python ultralytics_pro/finetune_yoloe26.py     --model_version 26s-seg     --lr0 0.0025     --lrf 0.5     --optimizer MuSGD     --momentum 0.9     --weight_decay 0.0007     --epochs 30     --close_mosaic 2     --batch 128     --device 0,1     --project runs/yoloe26s_tp_seg_ultra6     --name mobileclip2:b_26s-seg_bs128_epo30_close2_opMuSGD_o2m0.1_segment26_engine1_trainseghead_tp     --clip_weight_name mobileclip2:b     --ag True     --o2m 0.1     --weight_path weights/yoloe-26s.pt     --trainer YOLOESegTrainerSegHead     --semseg_loss False 
 #  using the following command to check the log:

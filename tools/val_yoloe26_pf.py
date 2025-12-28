@@ -71,10 +71,12 @@ def read_pf_det_from_seg_unfused(model_path,yaml_name,unfused_model_weight):
 
 version='26s'
 weight_path_tp="./runs/yoloe26s_tp_ultra6/mobileclip2:b_26s_bs128_ptwobject365v1_close2_agdata2_lrf0.5_bn_exp/weights/best.pt"
-model_weight="/home/louis/ultra_louis_work/ultralytics/runs/yoloe26s_pf_ultra6/mobileclip2:b_26s_bs128_ptwobject365v1_close2_agdata2_lrf_bn_o2m0.1_pfA/weights/best.pt"
 
 
-single_cls=True
+model_weight="./runs/yoloe26s_pf_ultra6/mobileclip2:b_26s_bs128_ptwobject365v1_close2_agdata2_lrf_bn_o2m0.1_pfA/weights/best.pt"
+#  mAP(B) 0.237	  mAP(B): 0.194
+
+single_cls=False
 
 if single_cls:
     model=YOLOE(model_weight)
@@ -88,4 +90,6 @@ else:
     model=read_pf_det_from_seg_unfused(model_weight,f"yoloe-{version}.yaml",weight_path_tp)
 
 
-    metrics = model.val(data="lvis.yaml",split="minival", single_cls=single_cls ,max_det=1000,save_json= (not single_cls)) # map 0
+    metrics = model.val(data="lvis.yaml",split="minival", single_cls=single_cls ,max_det=1000,save_json= (not single_cls),
+                        batch=1,
+                        project=f"runs/val_yoloe26_pf_{version}") # map 0

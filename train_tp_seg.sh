@@ -450,12 +450,40 @@ semseg_loss=False
 #  exp name: mobileclip2:b_26s-seg_bs128_epo10_close2_opMuSGD_o2m0.1_segment26_engine1_trainseghead_tp
 
 ############################################### train only the seg head #######################################
+
+# project_dir=runs/yoloe26s_tp_seg_ultra6
+# weight_path="weights/yoloe-26s.pt"
+# ptw="yoloe26s"
+# trainer="YOLOESegTrainerSegHead"
+# model=26s-seg
+# epo=30
+# close_mosaic=2
+# batch_size=128
+# ag=True
+
+# clip_weight_name="mobileclip2:b" # mobileclip2b
+
+
+# optimizer="MuSGD"
+# lr0=0.0025 # 0.00125
+# lrf=0.5
+# momentum=0.9
+# weight_decay=0.0005
+# o2m=0.1
+
+# semseg_loss=False
+# exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segment26_engine1_trainseghead_tp
+# device=6,7
+
+
+############################################### train only the seg head #######################################
+
 project_dir=runs/yoloe26s_tp_seg_ultra6
 weight_path="weights/yoloe-26s.pt"
 ptw="yoloe26s"
 trainer="YOLOESegTrainerSegHead"
 model=26s-seg
-epo=10
+epo=30
 close_mosaic=2
 batch_size=128
 ag=True
@@ -465,7 +493,7 @@ clip_weight_name="mobileclip2:b" # mobileclip2b
 
 optimizer="MuSGD"
 lr0=0.0025 # 0.00125
-lrf=0.05
+lrf=0.5
 momentum=0.9
 weight_decay=0.0005
 o2m=1
@@ -474,6 +502,11 @@ semseg_loss=False
 exp_name=${clip_weight_name}_${model}_bs${batch_size}_epo${epo}_close${close_mosaic}_op${optimizer}_o2m${o2m}_segment26_engine1_trainseghead_tp
 device=6,7
 
+# Command: python ultralytics/finetune_yoloe26.py     --model_version 26s-seg     --lr0 0.0025     --lrf 0.5     --optimizer MuSGD     --momentum 0.9     --weight_decay 0.0005     --epochs 30     --close_mosaic 2     --batch 128     --device 6,7     --project runs/yoloe26s_tp_seg_ultra6     --name mobileclip2:b_26s-seg_bs128_epo30_close2_opMuSGD_o2m1_segment26_engine1_trainseghead_tp     --clip_weight_name mobileclip2:b     --ag True     --o2m 1     --weight_path weights/yoloe-26s.pt     --trainer YOLOESegTrainerSegHead     --semseg_loss False 
+#  using the following command to check the log:
+#  tail -f -n 50 ./runs/20251230_085700.log
+#  Current screen: 
+#  exp name: mobileclip2:b_26s-seg_bs128_epo30_close2_opMuSGD_o2m1_segment26_engine1_trainseghead_tp
  ##############################################################################################
 pyfile=ultralytics/finetune_yoloe26.py
 timestamp=$(date +%Y%m%d_%H%M%S)

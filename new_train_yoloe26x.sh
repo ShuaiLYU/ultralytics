@@ -37,7 +37,8 @@ seg_device="4,5"
 
 #################################################### train tp ##################################################################
 model=26x
-weight_path="weights/yolo26x-objv1-seg[foryoloe].pt"
+# weight_path="weights/yolo26x-objv1-seg[foryoloe].pt"
+weight_path="yolo26x-objv1.pt"
 ptw="objv1"
 clip_weight_name="mobileclip2:b" # mobileclip2b
 
@@ -61,7 +62,7 @@ copy_paste=0.20
 mixup=0.60
 
 project_dir=$tp_project_dir
-tp_exp_name=${model}_ptw${ptw}_bs${batch_size}_epo${epo}_close${close_mosaic}_engine_or260105_tp
+tp_exp_name=${model}_ptw${ptw}_bs${batch_size}_epo${epo}_close${close_mosaic}_engine_tp1
 exp_name=$tp_exp_name
 
 pyfile="finetune_yoloe26.py"
@@ -73,7 +74,6 @@ python $pyfile \
     --optimizer $optimizer  --lr0 $lr0 --lrf $lrf  --momentum $momentum --weight_decay $weight_decay  --o2m $o2m \
     --epochs $epo  --close_mosaic $close_mosaic --batch $batch_size --device $device \
     --copy_paste $copy_paste --mixup $mixup  \
-    --override or260105 \
     --project $project_dir --name $exp_name 
 "
 

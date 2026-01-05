@@ -29,7 +29,7 @@ train_vp_switch=false
 train_pf_switch=false
 train_seg_switch=false
 
-tp_device="0,1,2,3"
+tp_device="4,5,6,7"
 vp_device="4,5,6"
 pf_device="7"
 seg_device="4,5"
@@ -37,8 +37,8 @@ seg_device="4,5"
 
 #################################################### train tp ##################################################################
 model=26x
-# weight_path="weights/yolo26x-objv1-seg[foryoloe].pt"
-weight_path="yolo26x-objv1.pt"
+weight_path="weights/yolo26x-objv1-seg[foryoloe].pt"
+# weight_path="yolo26x-objv1.pt"
 ptw="objv1"
 clip_weight_name="mobileclip2:b" # mobileclip2b
 
@@ -58,11 +58,11 @@ momentum=0.9
 weight_decay=0.0005
 o2m=1
 
-copy_paste=0.20
-mixup=0.60
+copy_paste=0.15
+mixup=0.05
 
 project_dir=$tp_project_dir
-tp_exp_name=${model}_ptw${ptw}_bs${batch_size}_epo${epo}_close${close_mosaic}_engine_tp1
+tp_exp_name=${model}_ptw${ptw}_bs${batch_size}_epo${epo}_close${close_mosaic}_engine_tp3
 exp_name=$tp_exp_name
 
 pyfile="finetune_yoloe26.py"

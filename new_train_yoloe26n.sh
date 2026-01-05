@@ -13,10 +13,10 @@ fi
 
 
 
-tp_project_dir=runs/yoloe26n_test
-vp_project_dir=runs/yoloe26n_test
-pf_project_dir=runs/yoloe26n_test
-seg_project_dir=runs/yoloe26n_test
+tp_project_dir=runs/yoloe26_tp
+vp_project_dir=runs/yoloe26_vp
+pf_project_dir=runs/yoloe26_pf
+seg_project_dir=runs/yoloe26_seg
 
 tp_trainer="YOLOETrainerFromScratch"
 vp_trainer="YOLOEVPTrainer"
@@ -46,19 +46,19 @@ ag=True
 trainer=$tp_trainer
 
 epo=30
-close_mosaic=5
+close_mosaic=2
 batch_size=256
 device=$tp_device
 
 optimizer="MuSGD"
-lr0=0.00125
-lrf=0.5
+lr0=0.005
+lrf=0.1
 momentum=0.9
-weight_decay=0.0005
+weight_decay=0.0007
 o2m=1
 
-copy_paste=0.15
-mixup=0.05
+copy_paste=0.1
+mixup=0.0
 
 project_dir=$tp_project_dir
 tp_exp_name=${model}_ptw${ptw}_bs${batch_size}_epo${epo}_close${close_mosaic}_engine_tp

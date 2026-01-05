@@ -13,10 +13,10 @@ fi
 
 
 
-tp_project_dir=runs/yoloe26m_test
-vp_project_dir=runs/yoloe26m_test
-pf_project_dir=runs/yoloe26m_test
-seg_project_dir=runs/yoloe26m_test
+tp_project_dir=runs/yoloe26_tp
+vp_project_dir=runs/yoloe26_vp
+pf_project_dir=runs/yoloe26_pf
+seg_project_dir=runs/yoloe26_seg
 
 tp_trainer="YOLOETrainerFromScratch"
 vp_trainer="YOLOEVPTrainer"
@@ -37,7 +37,7 @@ seg_device="4,5"
 
 #################################################### train tp ##################################################################
 model=26m
-weight_path="weights/yolo26m-objv1-seg.pt"
+weight_path="weights/yolo26m-objv1-seg[foryoloe].pt"
 ptw="objv1"
 clip_weight_name="mobileclip2:b" # mobileclip2b
 
@@ -45,8 +45,8 @@ ag=True
 
 trainer=$tp_trainer
 
-epo=30
-close_mosaic=5
+epo=25
+close_mosaic=2
 batch_size=256
 device=$tp_device
 
@@ -57,8 +57,8 @@ momentum=0.9
 weight_decay=0.0005
 o2m=1
 
-copy_paste=0.15
-mixup=0.05
+copy_paste=0.4
+mixup=0.15
 
 project_dir=$tp_project_dir
 tp_exp_name=${model}_ptw${ptw}_bs${batch_size}_epo${epo}_close${close_mosaic}_engine_tp

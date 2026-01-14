@@ -27,22 +27,14 @@ yoloe26l_pf="runs/yoloe26_pf/26l_ptwbest_tp_bs256_epo10_close2_engine_old_engine
 yoloe26x_pf="runs/yoloe26_pf/26x_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra6]/weights/best.pt"
 
 
-python ./tools/val_yoloe26_seg.py --device 0 \
- --model_weight "runs/yoloe26_seg/26n-seg_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra2]/weights/best.pt" \
- --val_mode tp_only
 
 
 
 
 
-
-
-
-
-
-python ./tools/val_yoloe26.py --device 0 \
+nohup python ./tools/val_yoloe26.py --device 0 \
  --model_weight  runs/yoloe26_vp/26n_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra8]/weights/best.pt \
- --val_mode all
+ --val_mode all > tp_vp_26n_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
 # Validation Results (IoU=0.50:0.95): n
 # ================================================================================
 # tp_end2end          : mAP50-95=0.237, mAP50=0.329, P=0.166, R=0.150
@@ -52,9 +44,9 @@ python ./tools/val_yoloe26.py --device 0 \
 
 
 
- python ./tools/val_yoloe26.py --device 0 \
+ nohup python ./tools/val_yoloe26.py --device 1 \
  --model_weight  runs/yoloe26_vp/26s_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra8]/weights/best.pt \
- --val_mode all
+ --val_mode all > tp_vp_26s_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
 # ================================================================================
 # Validation Results (IoU=0.50:0.95):
 # ================================================================================
@@ -65,9 +57,9 @@ python ./tools/val_yoloe26.py --device 0 \
 
 
 
-python ./tools/val_yoloe26.py --device 0 \
+nohup python ./tools/val_yoloe26.py --device 2 \
  --model_weight  runs/yoloe26_vp/26m_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra8]/weights/best.pt \
- --val_mode all
+ --val_mode all > tp_vp_26m_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 # ================================================================================
 # Validation Results (IoU=0.50:0.95):
@@ -79,9 +71,9 @@ python ./tools/val_yoloe26.py --device 0 \
 
 
 
-python ./tools/val_yoloe26.py --device 0 \
+nohup python ./tools/val_yoloe26.py --device 3 \
  --model_weight  runs/yoloe26_vp/26l_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra6]/weights/best.pt \
- --val_mode all
+ --val_mode all > tp_vp_26l_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 # Validation Results (IoU=0.50:0.95):
 # ================================================================================
@@ -91,9 +83,9 @@ python ./tools/val_yoloe26.py --device 0 \
 # vp_not_end2end      : mAP50-95=0.363, mAP50=0.485, P=0.267, R=0.278
 
 
-python ./tools/val_yoloe26.py --device 0 \
+nohup python ./tools/val_yoloe26.py --device 1 \
  --model_weight  runs/yoloe26_vp/26x_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra6]/weights/best.pt \
- --val_mode all
+ --val_mode all > tp_vp_26x_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 
 # ================================================================================
@@ -106,30 +98,12 @@ python ./tools/val_yoloe26.py --device 0 \
 
 
 
-python ./tools/val_yoloe26_pf.py --device 0 \
+nohup python ./tools/val_yoloe26_pf.py --device 1 \
  --tp_weight  "runs/yoloe26_tp/26n_ptwobjv1_bs256_epo30_close2_engine_old_engine_data_tp[ultra8]/weights/best.pt" \
- --pf_weight  "runs/yoloe26_pf/26n_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra8]/weights/best.pt" \
+ --pf_weight  "runs/yoloe26_pf/26n_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf2[ultra8]/weights/best.pt" \
  --single_cls False \
- --version 26n
+ --version 26n > pf_e2e_26n_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
-#  18 classes had less than 10000 detections!
-# Outputting 10000 detections for each class will improve AP further.
-# If using detectron2, please use the lvdevil/infer_topk.py script to output a results file with 10000 detections for each class.
-# ===
-# [01/12 04:07:00] lvis.results WARNING: Assuming user provided the results in correct format.
-#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.000
-#  Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets= -1 catIds=all] = 0.000
-#  Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets= -1 catIds=all] = 0.000
-#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.000
-#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.000
-#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.000
-#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  r] = 0.000
-#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  c] = 0.000
-#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  f] = 0.000
-#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.000
-#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.000
-#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.000
-#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.000
 
 
 
@@ -154,6 +128,12 @@ python ./tools/val_yoloe26_pf.py --device 0 \
 #  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.198
 #  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.441
 #  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.626
+
+
+
+
+
+
 
  python ./tools/val_yoloe26_pf.py --device 5 \
  --tp_weight  "runs/yoloe26_tp/26m_ptwobjv1_bs256_epo25_close2_engine_old_engine_data_tp[ultra8]/weights/best.pt" \
@@ -185,6 +165,7 @@ python ./tools/val_yoloe26_pf.py --device 0 \
  
 
 
+
   python ./tools/val_yoloe26_pf.py --device 1 \
  --tp_weight  "runs/yoloe26_tp/26l_ptwobjv1_bs256_epo20_close2_engine_old_engine_data_tp[ultra6]/weights/best.pt" \
  --pf_weight  "runs/yoloe26_pf/26l_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra6]/weights/best.pt" \
@@ -208,6 +189,7 @@ python ./tools/val_yoloe26_pf.py --device 0 \
 #  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.681
 # copypaste: AP,AP50,AP75,APs,APm,APl,APr,APc,APf
 # copypaste: 27.18,35.41,29.23,20.73,36.87,46.66,26.31,25.69,28.66
+
 
 
 
@@ -241,10 +223,136 @@ python ./tools/val_yoloe26_pf.py --device 0 \
 
 
 
+nohup python ./tools/val_yoloe26_pf.py --device 1  --tp_weight  "runs/yoloe26_tp/26n_ptwobjv1_bs256_epo30_close2_engine_old_engine_data_tp[ultra8]/weights/best.pt"  --pf_weight  "runs/yoloe26_pf/26n_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf2[ultra8]/weights//best.pt" \
+ --single_cls False  --not_end2end  --version 26n > pf_note2e_26n_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+
+# ===
+# [01/13 20:36:05] lvis.results WARNING: Assuming user provided the results in correct format.
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.177
+#  Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets= -1 catIds=all] = 0.244
+#  Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets= -1 catIds=all] = 0.187
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.114
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.254
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.367
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  r] = 0.158
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  c] = 0.164
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  f] = 0.192
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.315
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.153
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.381
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.583
+# copypaste: AP,AP50,AP75,APs,APm,APl,APr,APc,APf
+# copypaste: 17.69,24.43,18.74,11.37,25.42,36.74,15.78,16.39,19.19
+ 
+
+
+nohup python ./tools/val_yoloe26_pf.py --device 1  --tp_weight  "runs/yoloe26_tp/26s_ptwobjv1_bs256_epo30_close2_engine_old_engine_data_tp[ultra8]/weights/best.pt"  --pf_weight  "runs/yoloe26_pf/26s_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra8]/weights/best.pt"  --single_cls False --not_end2end  --version 26s > pf_note2e_26s_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# If using detectron2, please use the lvdevil/infer_topk.py script to output a results file with 10000 detections for each class.
+# ===
+# [01/13 13:32:05] lvis.results WARNING: Assuming user provided the results in correct format.
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.226
+#  Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets= -1 catIds=all] = 0.303
+#  Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets= -1 catIds=all] = 0.242
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.161
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.315
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.418
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  r] = 0.202
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  c] = 0.209
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  f] = 0.245
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.373
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.208
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.463
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.651
+# copypaste: AP,AP50,AP75,APs,APm,APl,APr,APc,APf
+
+nohup python ./tools/val_yoloe26_pf.py --device 5 \
+ --tp_weight  "runs/yoloe26_tp/26m_ptwobjv1_bs256_epo25_close2_engine_old_engine_data_tp[ultra8]/weights/best.pt" \
+ --pf_weight  "runs/yoloe26_pf/26m_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra8]/weights/best.pt" \
+ --single_cls False --not_end2end  \
+ --version 26m > pf_26m_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# If using detectron2, please use the lvdevil/infer_topk.py script to output a results file with 10000 detections for each class.
+# ===
+# [01/13 14:25:51] lvis.results WARNING: Assuming user provided the results in correct format.
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.264
+#  Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets= -1 catIds=all] = 0.348
+#  Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets= -1 catIds=all] = 0.284
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.200
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.363
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.463
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  r] = 0.245
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  c] = 0.250
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  f] = 0.279
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.421
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.260
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.515
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.679
+# copypaste: AP,AP50,AP75,APs,APm,APl,APr,APc,APf
+# copypaste: 26.37,34.76,28.41,19.97,36.34,46.34,24.50,25.04,27.87
+# Total predictions: 4752000
+# Saved predictions to runs/yoloe26_pf_eval/val_20260113-141855/predictions.mt.json
+# Evaluating LVIS fixed mAP...
+# /home/louis/miniconda3/envs/ultra/lib/python3.10/multiprocessing/resource_tracker.py:224: UserWarning: resource_tracker: There appear to be 2 leaked semaphore objects to clean up at shutdown
+
+nohup python ./tools/val_yoloe26_pf.py --device 1 \
+ --tp_weight  "runs/yoloe26_tp/26l_ptwobjv1_bs256_epo20_close2_engine_old_engine_data_tp[ultra6]/weights/best.pt" \
+ --pf_weight  "runs/yoloe26_pf/26l_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra6]/weights/best.pt" \
+ --single_cls False  --not_end2end  \
+ --version 26l > pf_note2e_26l_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# [01/13 13:58:23] lvis.results WARNING: Assuming user provided the results in correct format.
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.280
+#  Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets= -1 catIds=all] = 0.366
+#  Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets= -1 catIds=all] = 0.300
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.215
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.377
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.471
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  r] = 0.257
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  c] = 0.268
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  f] = 0.295
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.451
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.282
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.543
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.706
+# copypaste: AP,AP50,AP75,APs,APm,APl,APr,APc,APf
+# copypaste: 28.03,36.61,30.04,21.45,37.73,47.08,25.65,26.84,29.52
+
+nohup python ./tools/val_yoloe26_pf.py --device 2 \
+ --tp_weight  "runs/yoloe26_tp/26x_ptwobjv1_bs256_epo15_close2_engine_old_engine_data_tp[ultra6]/weights/best.pt" \
+ --pf_weight  "runs/yoloe26_pf/26x_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra6]/weights/best.pt" \
+ --single_cls False --not_end2end  \
+ --version 26x > pf_note2e_26x_bbox$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# ===
+# [01/13 14:15:24] lvis.results WARNING: Assuming user provided the results in correct format.
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.311
+#  Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets= -1 catIds=all] = 0.401
+#  Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets= -1 catIds=all] = 0.337
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.250
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.424
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.498
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  r] = 0.289
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  c] = 0.307
+#  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=  f] = 0.317
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= -1 catIds=all] = 0.489
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     s | maxDets= -1 catIds=all] = 0.323
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     m | maxDets= -1 catIds=all] = 0.582
+#  Average Recall     (AR) @[ IoU=0.50:0.95 | area=     l | maxDets= -1 catIds=all] = 0.742
+# copypaste: AP,AP50,AP75,APs,APm,APl,APr,APc,APf
+# copypaste: 31.06,40.12,33.69,24.98,42.36,49.84,28.93,30.74,31.72
+# Total predictions: 4745018
+# Saved predictions to runs/yoloe26_p
+
+
+ ##############
+
  python ./tools/val_yoloe26_seg.py --device 6 \
     --model_weight  "runs/yoloe26_seg/26n-seg_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra2]/weights/best.pt" \
     --version 26n \
     --batch 16
+
 
 
 # Evaluating faster-coco-eval mAP using /home/shared/ultralytics/runs/segment/val26/predictions.json and ../datasets/lvis/annotations/lvis_v1_val.json...
@@ -500,33 +608,35 @@ yoloe26x_seg="runs/yoloe26_seg/26x-seg_ptwbest_tp_bs256_epo10_close2_engine_old_
 
 
 
-nohup python ./tools/val_yoloe26_seg.py --device 0 --model_weight "runs/yoloe26_seg/26n-seg_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra2]/weights/best.pt" --val_mode tp_only > val_yoloe26_seg_26n_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-# val_yoloe26_seg_26n_20260112_064149.log
 
-
-
-nohup python ./tools/val_yoloe26_seg.py --device 0 --model_weight "runs/yoloe26_seg/26n-seg_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra2]/weights/best.pt" --val_mode vp_only > val_yoloe26_seg_26n_vp_only_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 
 
 # s
-nohup python ./tools/val_yoloe26_seg.py --device 1 --model_weight "runs/yoloe26_seg/26s-seg_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra8]/weights/best.pt" --val_mode all > val_yoloe26_seg_26s_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+nohup python ./tools/val_yoloe26_seg.py --device 1 --model_weight "weights/yoloe-26s-seg.pt" --val_mode vp_only > tp_only_val_yoloe26_seg_26s_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 
 
 # m
-nohup python ./tools/val_yoloe26_seg.py --device 2 --model_weight "runs/yoloe26_seg/26m-seg_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra2]/weights/best.pt" --val_mode all > val_yoloe26_seg_26m_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+nohup python ./tools/val_yoloe26_seg.py --device 2 --model_weight "weights/yoloe-26m-seg.pt" --val_mode vp_only > tp_only_val_yoloe26_seg_26m_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 
 
 # l 
-nohup python ./tools/val_yoloe26_seg.py --device 3 --model_weight "runs/yoloe26_seg/26l-seg_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra6]/weights/best.pt" --val_mode all > val_yoloe26_seg_26l_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+nohup python ./tools/val_yoloe26_seg.py --device 3 --model_weight "weights/yoloe-26l-seg.pt" --val_mode vp_only > tp_only_val_yoloe26_seg_26l_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 
 
 # x
-nohup python ./tools/val_yoloe26_seg.py --device 4 --model_weight "runs/yoloe26_seg/26x-seg_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_vp[ultra6]/weights/best.pt" --val_mode all > val_yoloe26_seg_26x_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+nohup python ./tools/val_yoloe26_seg.py --device 0 --model_weight "weights/yoloe-26x-seg.pt" --val_mode vp_only > tp_only_val_yoloe26_seg_26x_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
+
+
+
+nohup python ./tools/val_yoloe26_seg.py --device 1 --model_weight "weights/yoloe-26n-seg.pt" --val_mode vp_only > vp_only_val_yoloe26_seg_26n_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# l 
+nohup python ./tools/val_yoloe26_seg.py --device 2 --model_weight "weights/yoloe-26l-seg.pt" --val_mode vp_only > vp_only_val_yoloe26_seg_26l_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 
 

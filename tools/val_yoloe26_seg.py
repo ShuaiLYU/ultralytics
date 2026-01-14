@@ -45,7 +45,7 @@ from ultralytics import YOLOE
 
 
 
-def val_yoloe26(model_path,mode,end2end=True,device="0",task="detect"):
+def val_yoloe26(model_path,mode,end2end=True,device="0",task="segment"):
     """
     validate yoloe26 with text prompt or visual prompt.
     Args:
@@ -66,6 +66,7 @@ def val_yoloe26(model_path,mode,end2end=True,device="0",task="detect"):
         del model.model.model[-1].one2one_cv4
         model.model.end2end = False
 
+    assert task=="segment"
 
     if mode=="text_prompt":
 
@@ -93,7 +94,6 @@ if __name__=="__main__":
     parser.add_argument('--model_weight', type=str, default="./weights/yoloe-26s.pt", help='path to model weight')
     # swith to val tp and vp 
     parser.add_argument('--val_mode', type=str, default='all', help='validation mode: all, tp_only, vp_only')
-    parser.add_argument("--task", type=str, default='detect', help='task type: segment or detect')
 
 
     args = parser.parse_args()
@@ -111,17 +111,17 @@ if __name__=="__main__":
 
     if args.val_mode in ["all","tp_only"]:
         print("Validating YOLOE26 with Text Prompt...")
-        model=val_yoloe26(model_weight,mode="text_prompt",end2end=True,device=device,task=args.task)
+        model=val_yoloe26(model_weight,mode="text_prompt",end2end=True,device=device,task="segment")
         results["tp_end2end"] = model.val_stats if hasattr(model, 'val_stats') else model.metrics.results_dict
-        model=val_yoloe26(model_weight,mode="text_prompt",end2end=False,device=device,task=args.task)
+        model=val_yoloe26(model_weight,mode="text_prompt",end2end=False,device=device,task="segment")
         results["tp_not_end2end"]=model.val_stats if hasattr(model, 'val_stats') else model.metrics.results_dict
 
 
     if  args.val_mode in ["all","vp_only"]:
         print("Validating YOLOE26 with Visual Prompt...")
-        model=val_yoloe26(model_weight,mode="visual_prompt",end2end=True,device=device,task=args.task)
+        model=val_yoloe26(model_weight,mode="visual_prompt",end2end=True,device=device,task="segment")
         results["vp_end2end"]=model.val_stats if hasattr(model, 'val_stats') else model.metrics.results_dict
-        model=val_yoloe26(model_weight,mode="visual_prompt",end2end=False,device=device,task=args.task)
+        model=val_yoloe26(model_weight,mode="visual_prompt",end2end=False,device=device,task="segment")
         results["vp_not_end2end"]=model.val_stats if hasattr(model, 'val_stats') else model.metrics.results_dict
     
     print("\n" + "="*80)

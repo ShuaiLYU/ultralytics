@@ -53,7 +53,7 @@ def read_pf_det_from_seg_unfused(model_path,yaml_name,unfused_model_weight,clip_
         # del unfused_model.model.model[-1].one2one_cv3
         # del unfused_model.model.model[-1].one2one_cv4
         unfused_model.model.end2end = False
-        # unfused_model.model.model[-1].end2end = False
+        unfused_model.model.model[-1].end2end = False
 
     with open('./tools/ram_tag_list.txt', 'r') as f:
         names = [x.strip() for x in f.readlines()]
@@ -70,7 +70,8 @@ def read_pf_det_from_seg_unfused(model_path,yaml_name,unfused_model_weight,clip_
         # del det_model.model.model[-1].one2one_cv3
         # del det_model.model.model[-1].one2one_cv4
         det_model.model.end2end = False
-        # det_model.model.model[-1].end2end = False
+        det_model.model.model[-1].end2end = False
+        
 
 
     det_model.eval()

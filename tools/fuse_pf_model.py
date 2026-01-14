@@ -86,8 +86,8 @@ def fuse_tp_vocab_into_pf_model(pf_model_weight,yaml_name,tp_model_weight,clip_w
     # load the most model weights
     # pf_model = YOLOE(yaml_name).load(pf_model_weight)
     if scale == "26n":
-        pf_model = YOLOE(yaml_name).load(pf_model_weight)
-        # pf_model=YOLOE(pf_model_weight)
+        # pf_model = YOLOE(yaml_name).load(pf_model_weight)
+        pf_model=YOLOE(pf_model_weight)
     else:
         pf_model=YOLOE(pf_model_weight)
     pf_model.model.args['clip_weight_name']=clip_weight_name
@@ -175,7 +175,7 @@ def merge_pf_to_seg(model,seg_model):
 
 
 
-yoloe26n_pf="runs/yoloe26_pf/26n_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra8]/weights/best.pt"
+yoloe26n_pf="runs/yoloe26_pf/26n_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf2[ultra8]/weights//best.pt"
 yoloe26s_pf="runs/yoloe26_pf/26s_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra8]/weights/best.pt"
 yoloe26m_pf="runs/yoloe26_pf/26m_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra8]/weights/best.pt"
 yoloe26l_pf="runs/yoloe26_pf/26l_ptwbest_tp_bs256_epo10_close2_engine_old_engine_data_pf[ultra6]/weights/best.pt"
@@ -194,6 +194,8 @@ for scale, pf_model, tp_model in zip(["26n","26s","26m","26l","26x"],
                              [yoloe26n_tp,yoloe26s_tp,yoloe26m_tp,yoloe26l_tp,yoloe26x_tp]):
     # seg_model=f"weights/yoloe-{scale}-seg.pt" 
 
+    if scale != "26n":
+        continue
     dst_path=f"weights/yoloe-{scale}-seg-pf.pt"
 
  
@@ -210,12 +212,12 @@ for scale, pf_model, tp_model in zip(["26n","26s","26m","26l","26x"],
 
 
 
-    # # model=seg_model
-    # model.model.end2end = False
-    # model.model.model[-1].end2end = False
+    model=seg_model
+    model.model.end2end = True
+    model.model.model[-1].end2end = True
 
-    # # infer test
-    # img_path="./ultralytics/assets/bus.jpg"
-    # results=model.predict(img_path,conf=0.25)
-    # results[0].save("runs/res-{}.jpg".format(scale))
+    # infer test
+    img_path="./ultralytics/assets/bus.jpg"
+    results=model.predict(img_path,conf=0.25)
+    results[0].save("runs/res-{}.jpg".format(scale))
 

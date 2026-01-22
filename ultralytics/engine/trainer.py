@@ -992,7 +992,7 @@ class BaseTrainer:
             import re
 
             # higher lr for certain parameters in MuSGD when funetuning
-            pattern = re.compile(r"(?=.*23)(?=.*cv3)|proto\.semseg|flow_model")
+            pattern = re.compile(r"(?=.*23)(?=.*cv[34])|proto\.semseg|flow_model")
             g_ = []  # new param groups
             for x in g:
                 p = x.pop("params")

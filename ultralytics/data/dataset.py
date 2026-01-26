@@ -87,6 +87,14 @@ class YOLODataset(BaseDataset):
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         super().__init__(*args, channels=self.data.get("channels", 3), **kwargs)
 
+    def get_cache_suffix(self) -> str:
+        """Get the cache file suffix for this dataset.
+
+        Returns:
+            (str): Cache file suffix (e.g., '.cache', '.vps16.cache').
+        """
+        return ".cache"
+
     def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
         """Cache dataset labels, check images and read shapes.
 
@@ -163,7 +171,7 @@ class YOLODataset(BaseDataset):
             (list[dict]): List of label dictionaries, each containing information about an image and its annotations.
         """
         self.label_files = img2label_paths(self.im_files)
-        cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
+        cache_path = Path(self.label_files[0]).parent.with_suffix(self.get_cache_suffix())
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
             assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
@@ -832,3 +840,104 @@ class ClassificationDataset:
             x["msgs"] = msgs  # warnings
             save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
             return samples
+
+
+
+
+class VisualPromptDataset(YOLODataset):
+    """Dataset class for visual prompt learning tasks extending YOLODataset functionality.
+
+    This class is designed to handle datasets specifically for visual prompt learning, where each image is associated
+    with a visual prompt. It extends the YOLODataset class to include additional functionality for loading and
+    processing visual prompts alongside the standard image data.
+
+    Attributes:
+        num_shot (int): Number of shots (visual prompts) per class.
+
+    Methods:
+        cache_labels: Cache visual prompt dataset labels from pre-processed visual prompt data.
+        get_labels: Return dictionary of labels for visual prompt training.
+    """
+
+    def __init__(self, *args, num_shot: int = 16, **kwargs):
+        """Initialize the VisualPromptDataset.
+
+        Args:
+            num_shot (int): Number of shots (visual prompts) per class. Default is 16.
+            *args (Any): Additional positional arguments for the parent class.
+            **kwargs (Any): Additional keyword arguments for the parent class.
+        """
+        self.num_shot = num_shot
+        super().__init__(*args, **kwargs)
+
+    def get_cache_suffix(self) -> str:
+        """Get the cache file suffix for visual prompt dataset.
+
+        Returns:
+            (str): Cache file suffix with num_shot (e.g., '.vps16.cache').
+        """
+        return f".vps{self.num_shot}.cache"
+
+    def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
+        """Cache visual prompt dataset labels by sampling N images per class from the original dataset."""
+        import random
+
+        # Step 1: Prioritize files from train.txt for consistency with generation script
+        files_to_process, stem_to_label = self.label_files, {Path(f).stem: f for f in self.label_files}
+        train_txt = next((p for p in [Path(self.label_files[0]).parents[i] / "train.txt" for i in range(3, 0, -1)] + [Path("../datasets/lvis/train.txt")] if p.exists()), None)
+        if train_txt:
+            LOGGER.info(f"{self.prefix}Syncing with {train_txt}...")
+            with open(train_txt, "r") as f:
+                ordered = [stem_to_label[Path(line.strip()).stem] for line in f if Path(line.strip()).stem in stem_to_label]
+            if ordered:
+                files_to_process = ordered
+
+        # Build mappings
+        cls_file_map, file_label_map = defaultdict(list), {}
+        for label_file in TQDM(files_to_process, desc=f"{self.prefix}Reading labels...", total=len(files_to_process)):
+            if not Path(label_file).exists():
+                continue
+            with open(label_file, "r") as f:
+                labels = f.readlines()
+            if not labels:
+                continue
+            im_file = label_file.replace("/labels/", "/images/").replace(".txt", ".jpg")
+            for c in sorted({int(l.split()[0]) for l in labels}):
+                cls_file_map[c].append(im_file)
+            file_label_map[im_file] = labels
+
+        # Step 2: Sample N images per class
+        LOGGER.info(f"{self.prefix}Sampling {self.num_shot} images per class...")
+        random.seed(0)
+        cls_sample = {c: random.sample(files, k=min(self.num_shot, len(files))) for c, files in cls_file_map.items()}
+
+        # Step 3: Process samples
+        x, nf, ne, nc, msgs = {"labels": []}, 0, 0, 0, []
+        for c, files in TQDM(cls_sample.items(), desc=f"{self.prefix}Processing samples...", total=len(cls_sample)):
+            for im_file in files:
+                valid = [l for l in file_label_map[im_file] if int(l.split()[0]) == c]
+                lb = [list(map(float, l.strip().split()[:5])) for l in valid if len(l.strip().split()) >= 5]
+                if not lb:
+                    ne += 1; continue
+                
+                im = cv2.imread(im_file)
+                if im is None:
+                    nc += 1; continue
+                
+                nf += 1
+                x["labels"].append({
+                    "im_file": im_file, "shape": im.shape[:2], "cls": np.array(lb, dtype=np.float32)[:, 0:1],
+                    "bboxes": np.array(lb, dtype=np.float32)[:, 1:], "segments": [], "keypoints": None,
+                    "normalized": True, "bbox_format": "xywh"
+                })
+
+        if nf == 0:
+            LOGGER.warning(f"{self.prefix}No labels found in {path}. {HELP_URL}")
+        LOGGER.info(f"{self.prefix}Visual prompt sampling complete: {nf} images, {ne} empty, {nc} corrupt")
+        
+        x["hash"] = get_hash(self.label_files + self.im_files)
+        x["results"] = nf, 0, ne, nc, len(self.im_files)
+        x["msgs"] = msgs
+        x["num_shot"] = self.num_shot
+        save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
+        return x

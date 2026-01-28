@@ -1,0 +1,28 @@
+{
+  "version": "5.6.0a0",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "1",
+      "points": [
+        [
+          57.601351351351354,
+          195.4391891891892
+        ],
+        [
+          157.60135135135138,
+          90.0337837837838
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    }
+  ],
+  "imagePath": "In_231.bmp",
+  "imageData": null,
+  "imageHeight": 200,
+  "imageWidth": 200
+}

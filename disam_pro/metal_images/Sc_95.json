@@ -1,0 +1,28 @@
+{
+  "version": "5.6.0a0",
+  "flags": {},
+  "shapes": [
+    {
+      "label": "2",
+      "points": [
+        [
+          21.96467991169979,
+          196.5783664459161
+        ],
+        [
+          43.37748344370861,
+          7.395143487858719
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "shape_type": "rectangle",
+      "flags": {},
+      "mask": null
+    }
+  ],
+  "imagePath": "Sc_95.bmp",
+  "imageData": null,
+  "imageHeight": 200,
+  "imageWidth": 200
+}

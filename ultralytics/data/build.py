@@ -211,6 +211,119 @@ class ContiguousDistributedSampler(torch.utils.data.Sampler):
         self.epoch = epoch
 
 
+class BalancedDistributedSampler(torch.utils.data.Sampler):
+    """
+    Distributed sampler with class-balanced sampling.
+
+    Each image is assigned a weight based on the rarest class it contains (inverse frequency).
+    At each epoch, indices are drawn via weighted sampling (with replacement) so that rare classes
+    appear proportionally more often. The resulting global index list is then sharded across ranks,
+    giving each GPU a non-overlapping, contiguous slice of the same sampled sequence.
+
+    Args:
+        dataset: Dataset with a ``labels`` attribute — a list of dicts, each having a ``cls``
+            key whose value is a numpy array of shape ``(N, 1)`` containing class IDs.
+        num_replicas (int, optional): Number of distributed processes. Defaults to world size.
+        rank (int, optional): Rank of the current process. Defaults to current rank.
+        shuffle (bool): If True, additionally shuffle each rank's local slice every epoch.
+
+    Usage::
+
+        sampler = BalancedDistributedSampler(train_dataset)
+        loader = DataLoader(train_dataset, sampler=sampler, batch_size=32)
+        for epoch in range(epochs):
+            sampler.set_epoch(epoch)   # must call every epoch
+            for batch in loader:
+                ...
+    """
+
+    def __init__(self, dataset, num_replicas=None, rank=None, shuffle=True):
+        """Initialize the sampler, computing per-sample weights from class frequencies."""
+        if num_replicas is None:
+            num_replicas = dist.get_world_size() if dist.is_initialized() else 1
+        if rank is None:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.shuffle = shuffle
+        self.epoch = 0
+
+        self.sample_weights = self._compute_sample_weights()
+        # total samples drawn globally per epoch — same as dataset length so each rank
+        # gets roughly len(dataset) // num_replicas samples
+        self.total_size = len(dataset)
+
+    def _compute_sample_weights(self) -> torch.Tensor:
+        """Return per-image sampling weights based on inverse class frequency."""
+        labels = getattr(self.dataset, "labels", None)
+        if labels is None:
+            # Fallback: uniform weights
+            return torch.ones(len(self.dataset), dtype=torch.double)
+
+        # Flatten all class IDs to count global frequencies
+        all_cls = []
+        for lb in labels:
+            cls = lb.get("cls", [])
+            if len(cls):
+                all_cls.extend(cls.flatten().astype(int).tolist())
+
+        if not all_cls:
+            return torch.ones(len(self.dataset), dtype=torch.double)
+
+        class_counts = np.bincount(all_cls)
+        # Weight for each class = 1 / frequency (rare classes get higher weight)
+        class_weights = 1.0 / np.maximum(class_counts, 1).astype(np.float64)
+
+        # Per-image weight = max weight of its instances (images with rare classes prioritised)
+        img_weights = np.ones(len(labels), dtype=np.float64)
+        for i, lb in enumerate(labels):
+            cls = lb.get("cls", [])
+            if len(cls):
+                ids = cls.flatten().astype(int)
+                img_weights[i] = class_weights[ids].max()
+
+        return torch.from_numpy(img_weights)
+
+    def __iter__(self):
+        """Yield indices for this rank's slice of the class-balanced sample."""
+        g = torch.Generator()
+        g.manual_seed(self.epoch)
+
+        # 1. Weighted sampling (with replacement) over the whole dataset
+        indices = torch.multinomial(
+            self.sample_weights,
+            self.total_size,
+            replacement=True,
+            generator=g,
+        ).tolist()
+
+        # 2. Shard across ranks (contiguous slice)
+        per_rank = self.total_size // self.num_replicas
+        remainder = self.total_size % self.num_replicas
+        start = self.rank * per_rank + min(self.rank, remainder)
+        end = start + per_rank + (1 if self.rank < remainder else 0)
+        rank_indices = indices[start:end]
+
+        # 3. Optionally shuffle within this rank's slice
+        if self.shuffle:
+            perm = torch.randperm(len(rank_indices), generator=g).tolist()
+            rank_indices = [rank_indices[i] for i in perm]
+
+        return iter(rank_indices)
+
+    def __len__(self) -> int:
+        """Return number of samples for this rank."""
+        per_rank = self.total_size // self.num_replicas
+        remainder = self.total_size % self.num_replicas
+        return per_rank + (1 if self.rank < remainder else 0)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set epoch so each epoch uses a different sampling seed."""
+        self.epoch = epoch
+
+
 def seed_worker(worker_id: int):
     """Set dataloader worker seed for reproducibility across worker processes."""
     worker_seed = torch.initial_seed() % 2**32
@@ -288,6 +401,7 @@ def build_dataloader(
     rank: int = -1,
     drop_last: bool = False,
     pin_memory: bool = True,
+    balanced: bool = False,
 ):
     """
     Create and return an InfiniteDataLoader or DataLoader for training or validation.
@@ -300,6 +414,7 @@ def build_dataloader(
         rank (int, optional): Process rank in distributed training. -1 for single-GPU training.
         drop_last (bool, optional): Whether to drop the last incomplete batch.
         pin_memory (bool, optional): Whether to use pinned memory for dataloader.
+        balanced (bool, optional): Whether to use class-balanced sampling.
 
     Returns:
         (InfiniteDataLoader): A dataloader that can be used for training or validation.
@@ -312,13 +427,14 @@ def build_dataloader(
     batch = min(batch, len(dataset))
     nd = torch.cuda.device_count()  # number of CUDA devices
     nw = min(os.cpu_count() // max(nd, 1), workers)  # number of workers
-    sampler = (
-        None
-        if rank == -1
-        else distributed.DistributedSampler(dataset, shuffle=shuffle)
-        if shuffle
-        else ContiguousDistributedSampler(dataset)
-    )
+    if rank == -1:
+        sampler = None
+    elif balanced:
+        sampler = BalancedDistributedSampler(dataset, shuffle=shuffle)
+    elif shuffle:
+        sampler = distributed.DistributedSampler(dataset, shuffle=shuffle)
+    else:
+        sampler = ContiguousDistributedSampler(dataset)
     generator = torch.Generator()
     generator.manual_seed(6148914691236517205 + RANK)
     return InfiniteDataLoader(

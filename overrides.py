@@ -180,3 +180,26 @@ DATA_CONFIG["old_objv1_yolo_only"]=dict(
 )
 
 
+DATA_CONFIG["old_objv1_yolo_only_objval"]=dict(
+    train=dict(
+        yolo_data=[ "../datasets/Objects365v1.yaml"],
+    ),
+    val=dict(yolo_data=[ "../datasets/Objects365v1.yaml"]),
+)
+
+
+
+DATA_CONFIG["only_coco128"]=dict(
+    train=dict(
+        yolo_data=[ "coco128.yaml"],
+    ),
+    val=dict(yolo_data=[ "coco128.yaml"]),
+)
+
+
+
+
+
+
+
+

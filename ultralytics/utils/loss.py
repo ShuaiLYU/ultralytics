@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ultralytics.utils import LOGGER
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
@@ -217,10 +219,127 @@ class KeypointLoss(nn.Module):
         return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
 
 
+import pandas as pd
+import numpy as np
+
+
+def load_class_weights(
+    csv_path: str,
+    num_classes: int,
+    balance_by: str = "ClassCnt",
+    mode: str = "inverse",
+    beta: float = 0.9999,
+) -> torch.Tensor:
+    """
+    Load per-class weights from a CSV for cls loss balancing.
+
+    Args:
+        csv_path:    Path to CSV with columns [Id, Category, ImageCnt, ClassCnt].
+        num_classes: Expected number of classes (must match model.nc).
+        balance_by:  Column to use for computing weights — "ClassCnt" or "ImageCnt".
+        mode:        Weighting scheme:
+                       "inverse"     — w_i = 1 / freq_i  (classic)
+                       "sqrt_inverse"— w_i = 1 / sqrt(freq_i)
+                       "effective"   — Class-balanced loss via effective number of samples
+                                       (Cui et al. 2019), controlled by `beta`.
+                       "none"        — All weights = 1.0 (disabled).
+        beta:        Smoothing factor for "effective" mode (typical: 0.9, 0.99, 0.999, 0.9999).
+
+    Returns:
+        Tensor of shape (num_classes,) with normalized weights on CPU.
+    """
+    if mode == "none":
+        return torch.ones(num_classes, dtype=torch.float32)
+
+    df = pd.read_csv(csv_path)
+    df = df.dropna(subset=["Id"])           # drop the "total" footer row
+    df["Id"] = df["Id"].astype(int)
+
+    if len(df) != num_classes:
+        raise ValueError(
+            f"CSV has {len(df)} classes but model has {num_classes}. "
+            "Make sure `num_classes` matches your model's nc."
+        )
+
+    # Sort by Id so index == class id
+    df = df.sort_values("Id").reset_index(drop=True)
+    counts = df[balance_by].values.astype(np.float64)
+
+    if mode == "inverse":
+        w = 1.0 / np.clip(counts, 1, None)
+
+    elif mode == "sqrt_inverse":
+        w = 1.0 / np.sqrt(np.clip(counts, 1, None))
+
+    elif mode == "effective":
+        # Effective Number of Samples (Cui et al., CVPR 2019)
+        # E_n = (1 - beta^n) / (1 - beta)
+        effective_num = 1.0 - np.power(beta, counts)
+        w = (1.0 - beta) / np.clip(effective_num, 1e-8, None)
+
+    else:
+        raise ValueError(f"Unknown mode '{mode}'. Choose from: inverse, sqrt_inverse, effective, none.")
+
+    # Normalize so mean weight == 1 (keeps loss scale stable)
+    w = w / w.mean()
+    return torch.tensor(w, dtype=torch.float32)
+
+
+def build_name_to_weight(
+    csv_path: str,
+    balance_by: str = "ClassCnt",
+    mode: str = "effective",
+    beta: float = 0.999,
+) -> dict:
+    """
+    Build a {category_name: weight} dict from a CSV for per-batch cls loss balancing in TVP training.
+
+    The dict is looked up at every forward pass using batch["names"] to assemble a
+    per-batch cls_weights tensor that matches the visual-prompt classes in the batch.
+
+    Args:
+        csv_path:   Path to CSV with columns [Id, Category, ImageCnt, ClassCnt].
+        balance_by: Column used for computing weights — "ClassCnt" or "ImageCnt".
+        mode:       Weighting scheme — same options as load_class_weights.
+        beta:       Smoothing factor for "effective" mode (Cui et al. 2019).
+
+    Returns:
+        Dict mapping category name (str) to scalar float weight (mean-normalised).
+    """
+    df = pd.read_csv(csv_path)
+    df = df.dropna(subset=["Id"])
+    df["Id"] = df["Id"].astype(int)
+    df = df.sort_values("Id").reset_index(drop=True)
+    counts = df[balance_by].values.astype(np.float64)
+
+    if mode == "none":
+        w = np.ones(len(counts))
+    elif mode == "inverse":
+        w = 1.0 / np.clip(counts, 1, None)
+    elif mode == "sqrt_inverse":
+        w = 1.0 / np.sqrt(np.clip(counts, 1, None))
+    elif mode == "effective":
+        effective_num = 1.0 - np.power(beta, counts)
+        w = (1.0 - beta) / np.clip(effective_num, 1e-8, None)
+    else:
+        raise ValueError(f"Unknown mode '{mode}'. Choose from: inverse, sqrt_inverse, effective, none.")
+
+    w = w / w.mean()
+    weight={str(row["Category"]): float(w[idx]) for idx, row in df.iterrows()}
+
+    # consider "bread/bun" classes in Object365 datasets and add a mapping for bread and bun
+    for key in list(weight.keys()):
+        if "/" in key:
+            sub_keys = key.split("/")
+            for sub_key in sub_keys:
+                weight[sub_key] = weight[key]
+
+    return weight
+
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
 
-    def __init__(self, model, tal_topk: int = 10):  # model must be de-paralleled
+    def __init__(self, model, tal_topk: int = 10, cls_weights: torch.Tensor | None = None):  # model must be de-paralleled
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
@@ -236,11 +355,34 @@ class v8DetectionLoss:
 
         self.use_dfl = m.reg_max > 1
 
+        # cls balancing weights — shape (nc,), normalized so mean == 1
+        if cls_weights is not None:
+            assert cls_weights.shape[0] == self.nc, \
+                f"cls_weights length {cls_weights.shape[0]} != nc {self.nc}"
+            self.cls_weights = cls_weights.to(device)
+        else:
+            self.cls_weights = None
+
         self.assigner = TaskAlignedAssigner(
             topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0, stride=self.stride.tolist()
         )
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+
+        _csv = Path("obj365v1_cls_info.csv")
+        LOGGER.info(f"Loss: looking for cls weights CSV at {_csv.resolve()}")
+        if _csv.exists():
+            self.name_to_weight = build_name_to_weight(str(_csv))
+            _sample = sorted(self.name_to_weight.items(), key=lambda x: x[1])
+            LOGGER.info(f"✅v8DetectionLoss: loaded cls weights from {_csv}")
+            LOGGER.info(f"   Classes in mapping : {len(self.name_to_weight)}")  
+            LOGGER.info(f"   Min weight  → {_sample[0][0]!r}: {_sample[0][1]:.4f}")
+            LOGGER.info(f"   Max weight  → {_sample[-1][0]!r}: {_sample[-1][1]:.4f}")
+            LOGGER.info(f"   Mean weight : {sum(v for _, v in _sample) / len(_sample):.4f}")
+        else:
+            assert False
+            self.name_to_weight = None
+            LOGGER.warning(f"⚠️  Loss: cls weights CSV not found at {_csv.resolve()}, cls loss unweighted.")
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -301,8 +443,13 @@ class v8DetectionLoss:
 
         target_scores_sum = max(target_scores.sum(), 1)
 
-        # Cls loss
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # Cls loss — apply per-class weights if provided
+        cls_loss = self.bce(pred_scores, target_scores.to(dtype))  # (B, A, nc)
+        if "cls_weights" in batch.keys():
+            text_weights = batch["cls_weights"].to(self.device)  # (B, num_texts)
+            text_weight=text_weights.unsqueeze(1).expand(-1, pred_scores.shape[1], -1)  # (B, A, num_texts)
+            cls_loss = cls_loss * text_weight
+        loss[1] = cls_loss.sum() / target_scores_sum  # BCE
 
         # Bbox loss
         if fg_mask.sum():
@@ -344,6 +491,23 @@ class v8DetectionLoss:
     def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """A wrapper for get_assigned_targets_and_loss and parse_output."""
         batch_size = preds["boxes"].shape[0]
+        if self.name_to_weight is not None:
+            texts = batch.get("texts", [])  # List[List[str]], len == batch_size
+
+            if len(texts) > 0:
+                text_weights = torch.ones((batch_size, len(texts[0])), device=self.device)  # default weights = 1.0
+                
+                for i in range(batch_size):
+                    for j in range(len(texts[i])):
+                        text_weights[i, j] = self.name_to_weight.get(str(texts[i][j]), 1.0)
+                        if texts[i][j] not in self.name_to_weight:
+                            LOGGER.warning(f"⚠️  Loss: text '{texts[i][j]}' not found in name_to_weight mapping, assigned weight 0.0.")
+                    # print(f"Batch {i} min weight: {text_weights.min().item():.4f}, max weight: {text_weights.max().item():.4f}")
+
+                batch["cls_weights"] = text_weights
+            else:
+                LOGGER.warning("⚠️  Loss: 'texts' key not found in batch or empty, cls weights not applied.")
+
         loss, loss_detach = self.get_assigned_targets_and_loss(preds, batch)[1:]
         return loss * batch_size, loss_detach
 

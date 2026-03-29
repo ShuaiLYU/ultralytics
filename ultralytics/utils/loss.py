@@ -289,7 +289,7 @@ def build_name_to_weight(
     csv_path: str,
     balance_by: str = "ClassCnt",
     mode: str = "effective",
-    beta: float = 0.9999,
+    beta: float = 0.99,
 ) -> dict:
     """
     Build a {category_name: weight} dict from a CSV for per-batch cls loss balancing in TVP training.

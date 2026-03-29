@@ -445,7 +445,8 @@ class v8DetectionLoss:
 
         # Cls loss — apply per-class weights if provided
         cls_loss = self.bce(pred_scores, target_scores.to(dtype))  # (B, A, nc)
-        if "cls_weights" in batch.keys():
+        cls_weight_switch=False
+        if "cls_weights" in batch.keys() and cls_weight_switch :
             text_weights = batch["cls_weights"].to(self.device)  # (B, num_texts)
             text_weight=text_weights.unsqueeze(1).expand(-1, pred_scores.shape[1], -1)  # (B, A, num_texts)
             cls_loss = cls_loss * text_weight

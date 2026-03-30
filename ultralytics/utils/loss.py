@@ -288,7 +288,7 @@ def load_class_weights(
 def build_name_to_weight(
     csv_path: str,
     balance_by: str = "ClassCnt",
-    mode: str = "effective",
+    mode: str = "sqrt_inverse",
     beta: float = 0.99,
 ) -> dict:
     """
@@ -445,7 +445,7 @@ class v8DetectionLoss:
 
         # Cls loss — apply per-class weights if provided
         cls_loss = self.bce(pred_scores, target_scores.to(dtype))  # (B, A, nc)
-        cls_weight_switch=False
+        cls_weight_switch=True
         if "cls_weights" in batch.keys() and cls_weight_switch :
             text_weights = batch["cls_weights"].to(self.device)  # (B, num_texts)
             text_weight=text_weights.unsqueeze(1).expand(-1, pred_scores.shape[1], -1)  # (B, A, num_texts)

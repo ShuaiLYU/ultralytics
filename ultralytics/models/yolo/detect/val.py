@@ -14,7 +14,7 @@ from ultralytics.data import build_dataloader, build_yolo_dataset, converter
 from ultralytics.engine.validator import BaseValidator
 from ultralytics.utils import LOGGER, RANK, nms, ops
 from ultralytics.utils.checks import check_requirements
-from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
+from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, DetMetricsPerImage, box_iou
 from ultralytics.utils.plotting import plot_images
 
 
@@ -58,7 +58,7 @@ class DetectionValidator(BaseValidator):
         self.args.task = "detect"
         self.iouv = torch.linspace(0.5, 0.95, 10)  # IoU vector for mAP@0.5:0.95
         self.niou = self.iouv.numel()
-        self.metrics = DetMetrics()
+        self.metrics = DetMetricsPerImage()
 
     def preprocess(self, batch: dict[str, Any]) -> dict[str, Any]:
         """Preprocess batch of images for YOLO validation.
@@ -186,6 +186,7 @@ class DetectionValidator(BaseValidator):
                     "target_img": np.unique(cls),
                     "conf": np.zeros(0) if no_pred else predn["conf"].cpu().numpy(),
                     "pred_cls": np.zeros(0) if no_pred else predn["cls"].cpu().numpy(),
+                    "im_file": pbatch["im_file"],
                 }
             )
             # Evaluate
@@ -270,6 +271,27 @@ class DetectionValidator(BaseValidator):
                         *self.metrics.class_result(i),
                     )
                 )
+
+        # Print per-image stats sorted by recall50 ascending (worst cases first)
+        per_img = getattr(self.metrics, "per_image_stats", None)
+        if per_img and not self.training:
+            pf2 = "%-60s %7s %7s %6s %6s %6s %10s %10s %8s"
+            LOGGER.info(
+                "\n"
+                + pf2 % ("Image", "n_gt", "n_pred", "tp50", "fp50", "fn50", "prec50", "rec50", "ap50")
+            )
+            LOGGER.info("-" * 130)
+            pf2v = "%-60s %7d %7d %6d %6d %6d %10.3f %10.3f %8.3f"
+            for s in sorted(per_img, key=lambda x: x["recall50"]):
+                LOGGER.info(
+                    pf2v % (
+                        Path(s["im_file"]).name,
+                        s["n_gt"], s["n_pred"],
+                        s["tp50"], s["fp50"], s["fn50"],
+                        s["precision50"], s["recall50"], s["ap50"],
+                    )
+                )
+            LOGGER.info("-" * 130)
 
     def _process_batch(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> dict[str, np.ndarray]:
         """Return correct prediction matrix.

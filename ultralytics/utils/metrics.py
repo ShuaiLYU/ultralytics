@@ -1176,6 +1176,91 @@ class DetMetrics(SimpleClass, DataExportMixin):
         ]
 
 
+class DetMetricsPerImage(DetMetrics):
+    """DetMetrics subclass that records per-image detection stats and saves them to a CSV.
+
+    Extends DetMetrics by accumulating per-image metrics (tp50, fp50, fn50, precision50,
+    recall50, ap50 at IoU=0.5) when 'im_file' is provided to update_stats. Results are
+    written to per_image_stats.csv in save_dir at the end of validation.
+
+    Attributes:
+        per_image_stats (list[dict]): Per-image stats accumulated during validation.
+    """
+
+    def __init__(self, names: dict[int, str] = {}) -> None:
+        """Initialize a DetMetricsPerImage instance with class names.
+
+        Args:
+            names (dict[int, str], optional): Dictionary of class names.
+        """
+        super().__init__(names)
+        self.per_image_stats: list[dict] = []
+
+    def update_stats(self, stat: dict[str, Any]) -> None:
+        """Update statistics and record per-image metrics if 'im_file' is present in stat.
+
+        Args:
+            stat (dict[str, Any]): Stat dict passed to the base class. If it contains
+                'im_file', per-image tp50/fp50/fn50/precision50/recall50/ap50 are computed
+                at IoU > 0.5 and appended to self.per_image_stats.
+        """
+        super().update_stats(stat)
+
+        if "im_file" not in stat:
+            return
+
+        tp_arr = stat["tp"]       # (N_pred, 10) bool; column 0 = IoU > 0.5
+        conf_arr = stat["conf"]   # (N_pred,)
+        n_gt = int(len(stat["target_cls"]))
+        n_pred = int(tp_arr.shape[0])
+        eps = 1e-16
+
+        if n_pred > 0:
+            order = np.argsort(-conf_arr)
+            tp50 = tp_arr[order, 0].astype(float)
+            cumtp = tp50.cumsum()
+            ap50, _, _ = compute_ap(cumtp / np.arange(1, n_pred + 1), cumtp / (n_gt + eps))
+            tp50_count = int(tp50.sum())
+        else:
+            tp50_count, ap50 = 0, 0.0
+
+        fp50 = n_pred - tp50_count
+        fn50 = max(n_gt - tp50_count, 0)
+        self.per_image_stats.append(
+            {
+                "im_file": stat["im_file"],
+                "n_gt": n_gt,
+                "n_pred": n_pred,
+                "tp50": tp50_count,
+                "fp50": fp50,
+                "fn50": fn50,
+                "precision50": round(tp50_count / n_pred if n_pred > 0 else 0.0, 5),
+                "recall50": round(tp50_count / n_gt if n_gt > 0 else 0.0, 5),
+                "ap50": round(float(ap50), 5),
+            }
+        )
+
+    def process(self, save_dir: Path = Path("."), plot: bool = False, on_plot=None) -> dict[str, np.ndarray]:
+        """Process detection results and write per_image_stats.csv to save_dir if stats exist."""
+        stats = super().process(save_dir=save_dir, plot=plot, on_plot=on_plot)
+        if self.per_image_stats:
+            import csv
+
+            csv_path = save_dir / "per_image_stats.csv"
+            fieldnames = ["im_file", "n_gt", "n_pred", "tp50", "fp50", "fn50", "precision50", "recall50", "ap50"]
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self.per_image_stats)
+            LOGGER.info(f"Per-image stats saved to {csv_path}")
+        return stats
+
+    def clear_stats(self) -> None:
+        """Clear the stored statistics including per-image stats."""
+        super().clear_stats()
+        self.per_image_stats.clear()
+
+
 class SegmentMetrics(DetMetrics):
     """Calculate and aggregate detection and segmentation metrics over a given set of classes.
 

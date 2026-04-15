@@ -1201,7 +1201,7 @@ class DetMetricsPerImage(DetMetrics):
 
         Args:
             stat (dict[str, Any]): Stat dict passed to the base class. If it contains
-                'im_file', per-image tp50/fp50/fn50/precision50/recall50/ap50 are computed
+                'im_file', per-image tp50/fp50/fn50/precision50/recall50/f1_50/ap50 are computed
                 at IoU > 0.5 and appended to self.per_image_stats.
         """
         super().update_stats(stat)
@@ -1226,6 +1226,9 @@ class DetMetricsPerImage(DetMetrics):
 
         fp50 = n_pred - tp50_count
         fn50 = max(n_gt - tp50_count, 0)
+        precision50 = tp50_count / n_pred if n_pred > 0 else 0.0
+        recall50 = tp50_count / n_gt if n_gt > 0 else 0.0
+        f1_50 = 2 * precision50 * recall50 / (precision50 + recall50 + eps)
         self.per_image_stats.append(
             {
                 "im_file": stat["im_file"],
@@ -1234,8 +1237,9 @@ class DetMetricsPerImage(DetMetrics):
                 "tp50": tp50_count,
                 "fp50": fp50,
                 "fn50": fn50,
-                "precision50": round(tp50_count / n_pred if n_pred > 0 else 0.0, 5),
-                "recall50": round(tp50_count / n_gt if n_gt > 0 else 0.0, 5),
+                "precision50": round(precision50, 5),
+                "recall50": round(recall50, 5),
+                "f1_50": round(f1_50, 5),
                 "ap50": round(float(ap50), 5),
             }
         )
@@ -1247,7 +1251,18 @@ class DetMetricsPerImage(DetMetrics):
             import csv
 
             csv_path = save_dir / "per_image_stats.csv"
-            fieldnames = ["im_file", "n_gt", "n_pred", "tp50", "fp50", "fn50", "precision50", "recall50", "ap50"]
+            fieldnames = [
+                "im_file",
+                "n_gt",
+                "n_pred",
+                "tp50",
+                "fp50",
+                "fn50",
+                "precision50",
+                "recall50",
+                "f1_50",
+                "ap50",
+            ]
             with open(csv_path, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()

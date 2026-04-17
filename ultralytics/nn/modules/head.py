@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import copy
 import math
+from typing import List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.init import constant_, xavier_uniform_
 
-from ultralytics.utils import NOT_MACOS14
+from ultralytics.utils import LOGGER, NOT_MACOS14
 from ultralytics.utils.tal import dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import TORCH_1_11, fuse_conv_and_bn, smart_inference_mode
 
@@ -959,6 +960,10 @@ class LRPCHead(nn.Module):
             )
 
 
+
+
+
+
 class YOLOEDetect(Detect):
     """Head for integrating YOLO detection models with semantic understanding from text embeddings.
 
@@ -1776,3 +1781,416 @@ class v10Detect(Detect):
     def fuse(self):
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
+
+
+class ADMBHead(nn.Module):
+    """Memory-bank anomaly detection head.
+
+    Scores each anchor position by cosine similarity against stored normal-image
+    features, replacing the standard proposal-filter (pf) module.
+
+    During a warmup pass (``update=True``) features are accumulated into the memory
+    bank.  During inference (``update=False``) each position receives a Noisy-OR
+    anomaly score; positions that exceed ``conf`` are kept as proposals.
+
+    Attributes:
+        vocab_linear (nn.Linear): Linear classifier used in detect-mode scoring.
+        loc (nn.Module): Box-regression (localization) module.
+        memory_bank (Tensor): L2-normalised normal-image features [N, C].
+        feature_dim (int | None): Channel depth, inferred on first accumulation.
+        update (bool): Accumulate features when True; score positions when False.
+        temperature (float): Noisy-OR temperature exponent (default 1.0).
+        anomaly_mode (bool): Output single-channel anomaly logit (True) or
+            nc-class vocabulary scores (False).
+    """
+
+    def __init__(self, vocab: nn.Module, loc: nn.Module, temperature: float = 3.0,
+                 accumulate_thresh: float = 0.4,K=15) -> None:
+        super().__init__()
+        self.vocab_linear = self._conv2linear(vocab)
+        self.loc = loc
+        self.register_buffer("memory_bank", torch.empty(0, 0), persistent=True)
+        self.feature_dim: int | None = None
+        self.update = True
+        self.temperature = temperature
+        self.K=K
+        self.accumulate_thresh = accumulate_thresh
+
+
+    # ── configuration ────────────────────────────────────────────────────────
+
+    def set_update(self, update: bool) -> None:
+        """Toggle memory-bank accumulation on (True) / off (False)."""
+        self.update = update
+
+    def reset_memory_bank(self) -> None:
+        """Discard all accumulated normal features."""
+        self.memory_bank = torch.empty((0, 0), device=self.memory_bank.device)
+        self.feature_dim = None
+
+    def get_memory_bank_stats(self) -> dict:
+        """Return size and feature dimension of the current memory bank."""
+        mem = self._memory_tensor()
+        return {
+            "size": mem.shape[0],
+            "feature_dim": self.feature_dim,
+        }
+
+    # ── internals ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _conv2linear(conv: nn.Conv2d) -> nn.Linear:
+        """Convert a 1×1 Conv2d to an equivalent nn.Linear."""
+        assert isinstance(conv, nn.Conv2d) and conv.kernel_size == (1, 1)
+        linear = nn.Linear(conv.in_channels, conv.out_channels)
+        linear.weight.data = conv.weight.view(conv.out_channels, -1).data
+        linear.bias.data = conv.bias.data
+        return linear
+
+    def _memory_tensor(self) -> torch.Tensor:
+        device = self.memory_bank.device
+        embed_dim = self.feature_dim if self.feature_dim is not None else self.vocab_linear.in_features
+
+        if self.memory_bank.dim() != 2 or self.memory_bank.shape[1] != embed_dim or self.memory_bank.shape[0] == 0:
+            self.memory_bank = torch.zeros((10, embed_dim), device=device)
+        return self.memory_bank
+
+    def _anomaly_scores(self, features: torch.Tensor, mem: torch.Tensor | None = None) -> torch.Tensor:
+        """Return Noisy-OR anomaly scores ∈ [0, 1] for every spatial position.
+
+        Shape: [B*H*W].  0 = normal, 1 = anomalous.
+        Falls back to 0.5 (neutral) when the memory bank is empty.
+        """
+        if mem is None or mem.numel() == 0 or mem.shape[0] == 0:
+            n = features.numel() // features.shape[1] if features.dim() == 4 else features.shape[0]
+            return torch.full((n,), 0.5, device=features.device)
+        if features.dim() == 4:
+            B, C, H, W = features.shape
+            features = features.permute(0, 2, 3, 1).reshape(-1, C)
+        q = F.normalize(features.view(-1, self.feature_dim), p=2, dim=1)
+
+
+        # calculate cosine similarity between query features and memory bank features
+        sim = q @ mem.t()  # [N, M]
+
+        # ψ(x) = exp (−β(1 − x)), where x is the cosine similarity and β is the temperature hyperparameter. This transformation maps the cosine similarity to a value between 0 and 1, where higher similarity results in a value closer to 1, and lower similarity results in a value closer to 0. The temperature parameter β controls the sensitivity of the transformation, with higher values making it more sensitive to differences in similarity.
+        sim = torch.exp(-self.temperature * (1 - sim)) # [N, M], 
+
+        
+        # select top-k most similar features for each query position, where k is a hyperparameter that determines how many of the most similar features to consider when calculating the anomaly score. The topk function returns the k largest values along the specified dimension (in this case, dim=1) and their corresponding indices. By selecting only the top-k most similar features, we can focus on the most relevant information in the memory bank while reducing computational complexity.
+        k = min(self.K, sim.shape[1])
+        topk_sim = sim.topk(k=k, dim=1).values           
+
+
+        # Noisy-OR (uniform weights): P(anomaly) = Π(1 - sim_i)^(1/k). This formula maps the top-k similarity scores to an overall anomaly probability. 
+        score=(1 - topk_sim).clamp(min=1e-8)
+        log_prob = (topk_sim.new_ones(1, k) / k * torch.log(score)).sum(dim=1)
+        prob= torch.exp(log_prob).clamp(0, 1)
+
+        return prob
+
+    def _online_bootstrapped_memory_accumulation(
+        self,
+        cls_feat: torch.Tensor,
+        scores_hw: torch.Tensor,
+        B: int,
+        H: int,
+        W: int,
+        accumulate_thresh: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Online Bootstrapped Memory Accumulation (OBMA).
+
+        Selects positions above ``accumulate_thresh`` as high-confidence normal
+        samples, L2-normalises and appends their features to the memory bank
+        (only when ``self.update`` is True).  Decouples *what gets stored*
+        (``accumulate_thresh``) from *what gets detected* (``accumulate_thresh``).
+
+        Returns:
+            mask:   bool [H*W] — positions selected for inference output.
+            logits: float [k]  — anomaly logits for masked positions;
+                                 sigmoid(logits) restores the anomaly probability.
+        """
+        accumulate_mask = scores_hw > accumulate_thresh
+
+        keep = scores_hw > self.accumulate_thresh  # bootstrap selection mask
+        feats = cls_feat.permute(0, 2, 3, 1).reshape(-1, self.feature_dim)
+        normed = F.normalize(feats[keep.repeat(B)].detach(), p=2, dim=1)
+        mem = self._memory_tensor()
+        self.memory_bank = torch.cat((mem, normed.to(mem.device, dtype=mem.dtype)), dim=0)
+        LOGGER.info(
+            "OBMA: added=%d/%d keep=%.1f%% infer=%.1f%% mem_size=%d",
+            normed.shape[0], B * H * W,
+            100.0 * keep.sum() / max(H * W, 1),
+            100.0 * accumulate_mask.sum() / max(H * W, 1),
+            self.memory_bank.shape[0],
+        )
+
+        return accumulate_mask
+
+    # ── forward ───────────────────────────────────────────────────────────────
+
+    def forward(self, cls_feat: torch.Tensor, loc_feat: torch.Tensor, conf: float = 0.5, anomaly_mode: bool = True) -> tuple:
+        """Forward pass.
+
+        Memory-bank building (``update=True``): accumulates features and returns
+        dummy proposals (discarded by the caller).
+
+        Inference (``update=False``): filters positions by anomaly score and returns:
+          - ``anomaly_mode=True``  → logit-encoded anomaly probability [B, 1, k]
+          - ``anomaly_mode=False`` → vocabulary classification scores  [B, nc, k]
+
+        Returns:
+            tuple: (loc_preds [B, reg_max*4, H, W],
+                    cls_scores [B, 1|nc, k],
+                    mask       bool [H*W])
+        """
+        B, C, H, W = cls_feat.shape
+        if self.feature_dim is None:
+            self.feature_dim=C
+
+        # compute anomaly score
+        scores_hw = self._anomaly_scores(cls_feat, mem=self._memory_tensor()).view(B, -1).max(dim=0).values  # [H*W]
+
+        # accumulate high-confidence normal features into the memory bank (only when self.update is True)
+        if self.update:
+            accumulate_mask = self._online_bootstrapped_memory_accumulation(cls_feat,
+                                                                             scores_hw,
+                                                                               B, H, W, 
+                                                                               self.accumulate_thresh)
+
+        # infer flow
+        mask= scores_hw> conf
+        if anomaly_mode:
+            # Convert anomaly probability p -> logit space so downstream sigmoid(logits) = p
+            logits = torch.log((scores_hw[mask].clamp(1e-6, 1 - 1e-6)) /
+                            (1 - scores_hw[mask].clamp(1e-6, 1 - 1e-6)))
+            cls_scores = logits.view(1, 1, -1).expand(B, 1, -1)                      # [B, 1, k]
+        else:
+            cls_flat = cls_feat.flatten(2).transpose(-1, -2)                          # [B, H*W, C]
+            cls_scores = self.vocab_linear(cls_flat[:, mask]).transpose(-1, -2)       # [B, nc, k]
+
+
+        return self.loc(loc_feat), cls_scores, mask
+
+
+class AnomalyDetection(Detect):
+    """
+    Anomaly Detection head based on YOLO/YOLOE architecture.
+
+    Arguments:
+    
+    
+    """
+    is_fused = False
+    _fixed_nc=None
+    def __init__(
+        self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()
+    ):
+        """
+        Initialize YOLO detection layer with nc classes and layer channels ch.
+
+        Args:
+            nc (int): Number of classes.
+            embed (int): Embedding dimension.
+            with_bn (bool): Whether to use batch normalization in contrastive head.
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+        """
+        super().__init__(nc, reg_max, end2end, ch)
+        self.adhead = None  # Anomaly detection head will be built separately with build_adhead()
+
+        self.accumulate_thresh=0.4 # score threshold for memory-bank accumulation during update; see ADMBHead.set_accumulate_thresh()
+        self.temperature=3.0 # Noisy-OR temperature exponent; see ADMBHead._anomaly_scores()
+        self.K=15 # number of top-k most similar features to consider in anomaly scoring; see ADMBHead._anomaly_scores()
+        
+        self.ad_conf = 0.5 # confidence threshold for anomaly proposals during inference; see ADMBHead.forward()
+        self.ad_max_det = 9 # maximum number of detections per image during inference; see ADMBHead.forward()
+        self.anomaly_mode = True # whether to output single-channel anomaly logits (True) or nc-class vocabulary scores (False); see ADMBHead.forward()
+        super().__init__(nc, reg_max, end2end, ch)
+
+    @classmethod
+    def from_detect_head(cls, head: "Detect") -> "AnomalyDetection":
+        """Create an AnomalyDetection from an existing Detect/YOLOEDetect head, reusing all trained weights.
+
+        Unlike ``head.__class__ = AnomalyDetection``, this creates a genuine new object so the
+        original head reference is cleanly discarded after ``self.model[-1] = new_head``.
+
+        Implementation notes:
+          * ``nn.Module.__init__`` is called first to get a properly initialised Module
+            (fresh hook-dicts, empty registries, etc.).
+          * The exact set of keys created by ``nn.Module.__init__`` is captured as ``_skip``
+            so the code is robust across PyTorch versions.
+          * ``training`` is always copied from *head* (overrides the default ``True`` set by
+            ``nn.Module.__init__``).
+          * ``_modules`` / ``_parameters`` / ``_buffers`` are copied element-by-element so
+            both the new head and the discarded old head never share the same dict object.
+
+        Args:
+            head: An existing ``Detect`` (or subclass) head module.
+
+        Returns:
+            AnomalyDetection: New instance sharing trained submodule objects with *head*.
+        """
+        new = object.__new__(cls)
+        nn.Module.__init__(new)  # sets up _modules, _parameters, _buffers, hooks, training=True
+
+        # Capture all keys initialised by nn.Module.__init__ so we can skip them
+        # when copying plain Python attrs (version-agnostic).
+        _skip = frozenset(new.__dict__)
+
+        # Copy plain Python instance attributes (nc, nl, reg_max, stride, inplace, …)
+        for k, v in head.__dict__.items():
+            if k not in _skip:
+                new.__dict__[k] = v
+
+        # training is in _skip (nn.Module.__init__ sets it to True), so override explicitly.
+        new.training = head.training
+
+        # Transfer registered submodules / params / buffers (the actual trained weights).
+        new._modules.update(head._modules)
+        new._parameters.update(head._parameters)
+        new._buffers.update(head._buffers)
+        new._non_persistent_buffers_set.update(getattr(head, "_non_persistent_buffers_set", set()))
+
+        # Set AD-specific defaults (absent on a raw Detect/YOLOEDetect head).
+        new.adhead = None
+        new.ad_conf = getattr(head, "ad_conf", 0.5)
+        new.ad_max_det = getattr(head, "ad_max_det", 15)
+        new.accumulate_thresh = getattr(head, "accumulate_thresh", 0.4)
+        new.temperature = getattr(head, "temperature", 3.0)
+        new.K = getattr(head, "K", 15)
+        new.anomaly_mode = getattr(head, "anomaly_mode", True)
+        return new
+
+    def build_adhead(self):
+        """Build anomaly detection sub-heads from self's cv2/cv3 layers.
+
+        Saves the final conv layers BEFORE deep-copying and truncating, so adhead
+        always receives the original (pre-truncation) final layers.
+
+        End2end models (yolo26, YOLOE-seg): use `one2one_cv2` / `one2one_cv3`.
+        Non-end2end models (yolov8, yolov5 …): use `cv2` / `cv3`.
+        """
+        import copy
+        self.original_nc = self.nc  # save for set_anomaly_mode(False)
+
+        _e2e = hasattr(self, "one2one_cv2")
+        src_cv2 = self.one2one_cv2 if _e2e else self.cv2
+        src_cv3 = self.one2one_cv3 if _e2e else self.cv3
+        assert len(src_cv2) == self.nl, "Number of heads must match number of feature levels."
+
+        # Save references to the original final layers BEFORE any rebinding.
+        # These become the vocab / loc modules of each ADMBHead.
+        saved_vocab = [src_cv3[i][-1] for i in range(self.nl)]
+        saved_loc   = [src_cv2[i][-1] for i in range(self.nl)]
+
+        # Deep-copy and truncate the cv branches so the backbone features are
+        # forwarded up to (but not including) the original final projection.
+        if _e2e:
+            self.one2one_cv2 = copy.deepcopy(self.one2one_cv2)
+            self.one2one_cv3 = copy.deepcopy(self.one2one_cv3)
+            cv2, cv3 = self.one2one_cv2, self.one2one_cv3
+        else:
+            self.cv2 = copy.deepcopy(self.cv2)
+            self.cv3 = copy.deepcopy(self.cv3)
+            cv2, cv3 = self.cv2, self.cv3
+
+        for loc_head, cls_head in zip(cv2, cv3):
+            assert isinstance(loc_head, nn.Sequential)
+            assert isinstance(cls_head, nn.Sequential)
+            del loc_head[-1]
+            del cls_head[-1]
+
+        self.adhead = nn.ModuleList(
+            ADMBHead(vocab=saved_vocab[i], loc=saved_loc[i],
+                     accumulate_thresh=self.accumulate_thresh, 
+                     temperature=self.temperature,
+                     K=self.K)
+            for i in range(self.nl)
+        )
+
+    def set_anomaly_mode(self, anomaly_mode: bool) -> None:
+        """Switch between anomaly scoring (nc=1) and original classification (nc=original_nc).
+
+        Args:
+            anomaly_mode (bool): True  = memory-bank cosine-similarity scoring, single class.
+                                 False = original nc-class classification (e.g., 80 COCO classes).
+        """
+        assert self.adhead is not None, "Call build_adhead() first."
+        self.nc = 1 if anomaly_mode else getattr(self, "original_nc", self.nc)
+        for h in self.adhead:
+            h.anomaly_mode = anomaly_mode
+
+
+    def set_ad_params(self, ad_conf: float | None = None, ad_max_det: int | None = None) -> None:
+        """Set anomaly-detection inference parameters.
+
+        Args:
+            ad_conf (float | None): Confidence threshold for anomaly proposals.
+                                    Defaults to 0.5 when not provided.
+            ad_max_det (int | None): Maximum number of detections per image.
+                                     Defaults to 15 when not provided.
+        """
+        if ad_conf is not None:
+            self.ad_conf = ad_conf
+        if ad_max_det is not None:
+            self.ad_max_det = ad_max_det
+
+
+    def _get_decode_boxes(self, x):
+        """Decode boxes; for end2end filter to anomaly-selected positions, for non-end2end keep all."""
+        dbox = super()._get_decode_boxes(x)
+        if self.adhead is not None and "index" in x:
+            dbox = dbox if (self.export and not self.dynamic) else dbox[..., x["index"]]
+        return dbox
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor | tuple:
+        """Run anomaly detection forward pass.
+
+        Sparse filtered output via memory-bank cosine-similarity scoring.
+        End2end models apply postprocess (top-k); non-end2end uses predictor NMS.
+        """
+        assert self.adhead is not None, "Call build_adhead() before forward()."
+
+        bs = x[0].shape[0]
+        cv2 = self.one2one_cv2 if self.end2end else self.cv2
+        cv3 = self.one2one_cv3 if self.end2end else self.cv3
+
+        boxes, scores, index = [], [], []
+        for i in range(self.nl):
+            cls_feat = cv3[i](x[i])
+            loc_feat = cv2[i](x[i])
+            box, score, idx = self.adhead[i](
+                cls_feat,
+                loc_feat,
+                self.ad_conf,
+                self.anomaly_mode
+            )
+            boxes.append(box.view(bs, self.reg_max * 4, -1))
+            scores.append(score)
+            index.append(idx)
+
+        preds = dict(boxes=torch.cat(boxes, 2), scores=torch.cat(scores, 2), feats=x, index=torch.cat(index))
+        self.nc = preds["scores"].shape[1] # Update number of classes based on scores
+        y = self._inference(preds)
+        if self.end2end:
+            y = self.postprocess(y.permute(0, 2, 1))
+        return y if self.export else (y, preds)
+    
+
+    def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
+        """Post-processes YOLO model predictions.
+
+        Args:
+            preds (torch.Tensor): Raw predictions with shape (batch_size, num_anchors, 4 + nc) with last dimension
+                format [x1, y1, x2, y2, class_probs].
+
+        Returns:
+            (torch.Tensor): Processed predictions with shape (batch_size, min(max_det, num_anchors), 6) and last
+                dimension format [x1, y1, x2, y2, max_class_prob, class_index].
+        """
+        boxes, scores = preds.split([4, self.nc], dim=-1)
+
+        scores, conf, idx = self.get_topk_index(scores, self.ad_max_det)
+        boxes = boxes.gather(dim=1, index=idx.repeat(1, 1, 4))
+        return torch.cat([boxes, scores, conf], dim=-1)
+    

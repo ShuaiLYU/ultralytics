@@ -55,6 +55,8 @@ from ultralytics.nn.modules import (
     ImagePoolingAttn,
     Index,
     LRPCHead,
+    AnomalyDetection,
+    ADMBHead,
     Pose,
     Pose26,
     RepC3,
@@ -1319,6 +1321,233 @@ class Ensemble(torch.nn.ModuleList):
         # y = torch.stack(y).mean(0)  # mean ensemble
         y = torch.cat(y, 2)  # nms ensemble, y shape(B, HW, C*num_models)
         return y, None  # inference, train output
+
+
+
+class YOLOAnomalyModel(DetectionModel):
+    """
+    Unified training-free anomaly detection model for both YOLOE and plain YOLO checkpoints.
+
+    Supports two output modes selectable via setup() or set_anomaly_mode():
+      - anomaly (default): memory-bank cosine-similarity scoring, nc=1.
+      - detect:            original classification head scoring, nc=original_nc.
+
+    Both YOLOE (YOLOEDetect/YOLOESegment) and plain YOLO (Detect) checkpoints are handled
+    with a single unified structure: the detection head is always changed to AnomalyDetection
+    with ADMBHead sub-heads.  For YOLOE checkpoints, text embeddings are
+    fused into the conv weights first so no cls_pe injection is needed at inference time.
+
+    Methods:
+        setup_anomaly_detection: Initialize anomaly detection for the loaded model.
+        set_memory_update: Toggle memory bank accumulation.
+        freeze_memory_bank: Stop updates after support set is loaded.
+        reset_memory_bank: Clear memory bank.
+        get_memory_bank_stats: Return per-head stats.
+        set_anomaly_mode: Switch between anomaly and detect modes.
+        loss: Not supported.
+    """
+
+    def _is_yoloe(self) -> bool:
+        """Return True when the head is a native YOLOEDetect (not the AnomalyDetection wrapper)."""
+        head = self.model[-1]
+        return isinstance(head, YOLOEDetect) and not isinstance(head, AnomalyDetection)
+
+    # ── YOLOE support methods (used when loaded checkpoint is a YOLOE model) ────
+
+    @smart_inference_mode()
+    def get_text_pe(self, text: list, batch: int = 80) -> torch.Tensor:
+        """Build fused text positional embeddings (YOLOE models only)."""
+        from ultralytics.nn.text_model import build_text_model
+
+        device = next(self.model.parameters()).device
+        text_model = build_text_model(getattr(self, "text_model", "mobileclip:blt"), device=device)
+        text_token = text_model.tokenize(text)
+        txt_feats = [text_model.encode_text(token).detach() for token in text_token.split(batch)]
+        txt_feats = txt_feats[0] if len(txt_feats) == 1 else torch.cat(txt_feats, dim=0)
+        txt_feats = txt_feats.reshape(-1, len(text), txt_feats.shape[-1])
+        head = self.model[-1]
+        assert isinstance(head, YOLOEDetect)
+        return head.get_tpe(txt_feats)
+
+    def set_classes(self, names: list, embeddings: torch.Tensor) -> None:
+        """Cache class embeddings for the YOLOE predict path (used internally by get_vocab)."""
+        assert embeddings.ndim == 3
+        self.pe = embeddings
+        self.model[-1].nc = len(names)
+        self.names = check_class_names(names)
+
+    @smart_inference_mode()
+    def get_vocab(self, names: list) -> "nn.ModuleList":
+        """Fuse text embeddings into cv3 weights and return the fused vocab layers."""
+        head = self.model[-1]
+        assert isinstance(head, YOLOEDetect) and not head.is_fused
+        tpe = self.get_text_pe(names)
+        self.set_classes(names, tpe)
+        device = next(self.model.parameters()).device
+        head.fuse(self.pe.to(device))
+        cv3 = getattr(head, "one2one_cv3", head.cv3)
+        vocab = nn.ModuleList()
+        for cls_head in cv3:
+            assert isinstance(cls_head, nn.Sequential)
+            vocab.append(cls_head[-1])
+        return vocab
+
+    def get_cls_pe(self, tpe, vpe) -> torch.Tensor:
+        """Combine text and visual embeddings into a single cls positional-embedding tensor."""
+        all_pe = []
+        if tpe is not None:
+            assert tpe.ndim == 3
+            all_pe.append(tpe)
+        if vpe is not None:
+            assert vpe.ndim == 3
+            all_pe.append(vpe)
+        if not all_pe:
+            all_pe.append(getattr(self, "pe", torch.zeros(1, 80, 512)))
+        return torch.cat(all_pe, dim=1)
+
+    # ── Unified forward ──────────────────────────────────────────────────────────
+
+    def predict(
+        self,
+        x,
+        profile=False,
+        visualize=False,
+        tpe=None,
+        augment=False,
+        embed=None,
+        vpe=None,
+        return_vpe=False,
+    ):
+        """Forward pass for both YOLOE (YOLOEDetect head) and plain YOLO models.
+
+        YOLOE heads need a class positional-embedding vector appended to the feature
+        list before each head call.  AnomalyDetection heads (plain YOLO path) are a
+        YOLOEDetect subclass but manage their own inputs — cls_pe must NOT be injected.
+        """
+        if augment:
+            return self._predict_augment(x)
+        y, dt, embeddings = [], [], []
+        b = x.shape[0]
+        embed_set = frozenset(embed) if embed is not None else {-1}
+        max_idx = max(embed_set)
+        for m in self.model:
+            if m.f != -1:
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            if profile:
+                self._profile_one_layer(m, x, dt)
+            # Inject cls_pe only for native YOLOE heads (YOLOEDetect / YOLOESegment).
+            # AnomalyDetection inherits YOLOEDetect but runs its own forward path.
+            if isinstance(m, YOLOEDetect) and not isinstance(m, AnomalyDetection):
+                vpe = m.get_vpe(x, vpe) if vpe is not None else None
+                if return_vpe:
+                    assert vpe is not None
+                    assert not self.training
+                    return vpe
+                cls_pe = self.get_cls_pe(m.get_tpe(tpe), vpe).to(device=x[0].device, dtype=x[0].dtype)
+                if cls_pe.shape[0] != b or m.export:
+                    cls_pe = cls_pe.expand(b, -1, -1)
+                x.append(cls_pe)
+            x = m(x)
+            y.append(x if m.i in self.save else None)
+            if visualize:
+                feature_visualization(x, m.type, m.i, save_dir=visualize)
+            if m.i in embed_set:
+                embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))
+                if m.i == max_idx:
+                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
+        return x
+
+    # ── Anomaly detection setup ──────────────────────────────────────────────────
+
+    def setup_anomaly_detection(self, names: list) -> None:
+        """Initialize anomaly detection using AnomalyDetection + ADMBHead for all model types.
+
+        For YOLOE checkpoints: text embeddings are fused into cv3/one2one_cv3 weights first
+        (via get_vocab), then the head class is changed to AnomalyDetection.  After fusing,
+        inference needs no cls_pe injection because the embeddings are baked into the weights.
+
+        For plain YOLO checkpoints: the head class is changed to AnomalyDetection directly.
+
+        Both paths end up with the same structure:
+            model[-1]  →  AnomalyDetection
+            model[-1].adhead  →  ModuleList[ADMBHead × nl]
+
+        Args:
+            names (list[str]): Class names, e.g. ["anomaly"] or original class names.
+            conf (float): Detection threshold in [0, 1].
+        """
+        head = self.model[-1]
+        # Save original state for set_anomaly_mode(False) restore
+        self._original_nc = head.nc
+        self._original_names = dict(self.names) if hasattr(self, "names") and self.names else {}
+
+        if self._is_yoloe():
+            # Fuse text embeddings into cv3/one2one_cv3 conv weights in-place.
+            # After this call head.one2one_cv3[i][-1] (or cv3[i][-1]) is a fused vocab Conv2d.
+            # We discard the returned ModuleList — build_adhead reads the same layers directly.
+            self.get_vocab(names)
+
+        # ── Unified: wrap head as a new AnomalyDetection instance ───────────────
+        # from_detect_head() creates a genuine new object (not an in-place class swap),
+        # preserving all trained weights via _modules / _parameters / _buffers copy.
+        head = AnomalyDetection.from_detect_head(head)
+        self.model[-1] = head  # replace the old head in the Sequential
+        head.build_adhead()
+        # nc must match actual output channels: always 1 in anomaly mode.
+        # head.nc is NOT set to len(names) — names are just labels for display.
+        # build_adhead already saved original_nc; set_anomaly_mode enforces nc=1.
+        head.set_anomaly_mode(True)   # default: anomaly mode, nc=1
+        # names can be multi-entry (e.g. ["anomaly","defect"]) for future detect mode
+        self._anomaly_names = check_class_names(names)
+        self.names = {0: names[0] if names else "anomaly"}
+
+    def _get_ad_heads(self) -> list:
+        """Return all ADMBHead instances from the unified adhead ModuleList."""
+        head = self.model[-1]
+        if not isinstance(head, AnomalyDetection) or head.adhead is None:
+            raise RuntimeError("Call setup_anomaly_detection() first.")
+        return [h for h in head.adhead if isinstance(h, ADMBHead)]
+
+    def set_memory_update(self, update: bool) -> None:
+        """Toggle memory bank accumulation for all anomaly detection heads."""
+        for h in self._get_ad_heads():
+            h.set_update(update)
+
+    def freeze_memory_bank(self) -> None:
+        """Freeze the memory bank. Call after loading the support set."""
+        self.set_memory_update(False)
+
+    def reset_memory_bank(self) -> None:
+        """Clear all stored normal features. Allows rebuilding with a new support set."""
+        for h in self._get_ad_heads():
+            h.reset_memory_bank()
+
+    def get_memory_bank_stats(self) -> list:
+        """Return memory bank statistics for all detection heads."""
+        return [h.get_memory_bank_stats() for h in self._get_ad_heads()]
+
+    def set_anomaly_mode(self, anomaly_mode: bool) -> None:
+        """Switch between memory-bank anomaly scoring (nc=1) and original classification.
+
+        True  → nc=1, confidence = cosine distance to normal memory bank.
+               self.names = the anomaly labels passed to setup() (e.g. {0:"anomaly"}).
+        False → nc=original_nc, confidence from original vocabulary head.
+               self.names = original checkpoint class names.
+        """
+        head = self.model[-1]
+        if not isinstance(head, AnomalyDetection):
+            raise RuntimeError("Call setup_anomaly_detection() first.")
+        head.set_anomaly_mode(anomaly_mode)
+        if anomaly_mode:
+            # Restore anomaly label names (stored during setup_anomaly_detection)
+            anomaly_names = getattr(self, "_anomaly_names", {0: "anomaly"})
+            self.names = {0: list(anomaly_names.values())[0]}
+        else:
+            self.names = getattr(self, "_original_names", {i: str(i) for i in range(head.nc)})
+
+    def loss(self, batch, preds=None):
+        """Not supported — YOLOAnomalyModel is training-free."""
+        raise NotImplementedError("YOLOAnomalyModel does not support training.")
 
 
 # Functions ------------------------------------------------------------------------------------------------------------

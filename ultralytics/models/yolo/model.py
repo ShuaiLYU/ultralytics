@@ -10,6 +10,7 @@ import torch
 from ultralytics.data.build import load_inference_source
 from ultralytics.engine.model import Model
 from ultralytics.models import yolo
+from ultralytics.nn.modules.head import AnomalyDetection
 from ultralytics.nn.tasks import (
     ClassificationModel,
     DetectionModel,
@@ -17,6 +18,7 @@ from ultralytics.nn.tasks import (
     PoseModel,
     SegmentationModel,
     WorldModel,
+    YOLOAnomalyModel,
     YOLOEModel,
     YOLOESegModel,
 )
@@ -429,3 +431,354 @@ class YOLOE(Model):
         self.overrides["agnostic_nms"] = True  # use agnostic nms for YOLOE default
 
         return super().predict(source, stream, **kwargs)
+
+
+
+
+class AnomalyPredictor(yolo.detect.DetectionPredictor):
+    """Predictor for YOLOAnomaly models.
+
+    Handles the (y, preds_dict) tuple that AnomalyDetection.forward() returns in
+    non-export mode: extracts the tensor `y` before passing it to NMS / postprocess.
+    """
+
+    def postprocess(self, preds, img, orig_imgs, **kwargs):
+        """Unpack model output tuple then delegate to DetectionPredictor.postprocess."""
+        # AnomalyDetection.forward() returns (y_tensor, preds_dict) in non-export mode.
+        # y_tensor is already top-k selected by Detect.postprocess (end2end path).
+        if isinstance(preds, (tuple, list)):
+            preds = preds[0]
+        return super().postprocess(preds, img, orig_imgs, **kwargs)
+
+
+class YOLOAnomaly(Model):
+    """
+    YOLO-based training-free anomaly detection model.
+
+    Loads any YOLOE-compatible pretrained model and converts it into anomaly detection
+    mode using a memory bank of normal feature representations. No gradient-based
+    training is needed: feed normal images via load_support_set() to populate the bank,
+    then call predict().
+
+    Attributes:
+        model: The underlying YOLOAnomalyModel instance.
+
+    Methods:
+        __init__: Initialize from any YOLOE pretrained model file.
+        task_map: Map tasks to model, validator, and predictor classes.
+        setup: Configure anomaly detection with class names and threshold.
+        load_support_set: Feed normal images to build the memory bank.
+        save_mb: Save memory-bank payload to disk.
+        load_mb: Load memory-bank payload from disk.
+        reset_memory_bank: Clear the memory bank for reuse with a new support set.
+        get_memory_bank_stats: Return memory bank statistics per detection head.
+
+    Examples:
+        One-shot anomaly detection workflow
+        >>> model = YOLOAnomaly("yolo26s.pt")
+        >>> model.setup(["defect"], conf=0.1)
+        >>> model.load_support_set("datasets/mvtec/leather/train/good/")
+        >>> results = model.predict("datasets/mvtec/leather/test/crack/")
+    """
+
+    def __init__(self, model: str | Path = "yoloe-11s.pt", verbose: bool = False) -> None:
+        """
+        Initialize YOLOAnomaly from a pretrained model file.
+
+        Loads the checkpoint and automatically upgrades the underlying YOLOEModel to
+        YOLOAnomalyModel to enable memory bank methods. Call setup() after initialization.
+
+        Args:
+            model (str | Path): Path to pretrained model (*.pt), e.g. 'yolo26s.pt'.
+            verbose (bool): Print model info on load.
+
+        Raises:
+            AssertionError: If the loaded model is not a YOLOEModel instance.
+        """
+        super().__init__(model=model, task=None, verbose=verbose)
+        if not isinstance(self.model, YOLOAnomalyModel):
+            if isinstance(self.model, DetectionModel):
+                self.model.__class__ = YOLOAnomalyModel
+            else:
+                raise AssertionError(
+                    f"YOLOAnomaly requires a DetectionModel or YOLOEModel checkpoint, "
+                    f"but loaded {type(self.model).__name__}."
+                )
+
+    @property
+    def task_map(self) -> dict[str, dict[str, Any]]:
+        """Map tasks to model, validator, and predictor classes."""
+        return {
+            "detect": {
+                "model": DetectionModel,
+                "predictor": AnomalyPredictor,
+                "validator": yolo.detect.DetectionValidator,
+            },
+            # Segmentation checkpoints are supported as backbones; anomaly output is
+            # always detection-shaped (boxes only), so we reuse AnomalyPredictor.
+            "segment": {
+                "model": SegmentationModel,
+                "predictor": AnomalyPredictor,
+                "validator": yolo.detect.DetectionValidator,
+            },
+        }
+
+    def setup(self, names: list[str]) -> None:
+        """
+        Configure anomaly detection with class names.
+
+        Must be called before load_support_set() and predict().
+
+        Pass ``["anomaly"]`` (or any custom single name) to enable memory-bank cosine-similarity
+        scoring (nc=1).  Pass ``["detect"]`` to use the model's original classification head
+        scores with the original class names — useful for baseline comparison.
+
+        Use set_ad_params() to configure the detection threshold (ad_conf) and max detections
+        (ad_max_det) independently before running predict().
+
+        Args:
+            names (list[str]): Anomaly class names, e.g. ["anomaly"] or ["defect", "scratch"].
+                Use ["detect"] as a special sentinel to start in original-classifier mode.
+        """
+        assert isinstance(self.model, YOLOAnomalyModel), (
+            f"Expected YOLOAnomalyModel, got {type(self.model).__name__}. "
+            "Ensure you loaded a YOLOE or plain YOLO detection model."
+        )
+        detect_mode = names == ["detect"]
+        if detect_mode:
+            # Use the model's current (original) class names so vocab embeddings are correct
+            init_names = list(self.model.names.values())
+        else:
+            init_names = names
+        self.model.setup_anomaly_detection(init_names)
+        if detect_mode:
+            self.model.set_anomaly_mode(False)  # confidence = original head scores
+        # names are already set correctly inside setup_anomaly_detection / set_anomaly_mode
+
+    def load_support_set(
+        self,
+        source,
+        conf: float = 1e-6,
+        imgsz: int = 640,
+        device=None,
+        verbose: bool = True,
+        **kwargs,
+    ) -> list[dict]:
+        """
+        Feed normal (non-anomalous) images to populate the memory bank.
+
+        Memory bank is automatically frozen after this call. Run once before predict().
+
+        Args:
+            source: Image source - file path, directory, list of paths, etc.
+            conf (float): Very low confidence to capture all candidate regions.
+            imgsz (int): Inference image size.
+            device: Device to run on (e.g. 'cuda:0', 'cpu').
+            verbose (bool): Print memory bank stats after building.
+            **kwargs: Additional keyword arguments passed to predict().
+
+        Returns:
+            list[dict]: Memory bank statistics per detection head.
+
+        Examples:
+            >>> model.load_support_set("datasets/mvtec/leather/train/good/")
+        """
+        from ultralytics.utils import LOGGER
+
+        def iter_support_sources(src):
+            """Yield support images one-by-one so memory updates happen incrementally."""
+            if isinstance(src, (list, tuple, set)):
+                for item in src:
+                    yield item
+                return
+
+            path = Path(src) if isinstance(src, (str, Path)) else None
+            if path and path.is_dir():
+                exts = {".bmp", ".dng", ".jpeg", ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp", ".pfm"}
+                for item in sorted(path.iterdir()):
+                    if item.is_file() and item.suffix.lower() in exts:
+                        yield str(item)
+                return
+
+            yield src
+
+        assert isinstance(self.model, YOLOAnomalyModel), (
+            "Call setup() before load_support_set()."
+        )
+        if verbose:
+            LOGGER.info("YOLOAnomaly: building memory bank from support set...")
+        self.model.set_memory_update(True)
+        for item in iter_support_sources(source):
+            self.predict(source=item, conf=conf, imgsz=imgsz, device=device, verbose=False, **kwargs)
+        self.model.freeze_memory_bank()
+        stats = self.model.get_memory_bank_stats()
+        if verbose:
+            for i, s in enumerate(stats):
+                LOGGER.info(f"  Head[{i}]: {s['size']} features, dim={s['feature_dim']}")
+        return stats
+
+    def reset_memory_bank(self) -> None:
+        """
+        Clear the memory bank to allow rebuilding with a different support set.
+
+        Does not require reloading the model.
+        """
+        assert isinstance(self.model, YOLOAnomalyModel)
+        self.model.reset_memory_bank()
+
+    def save_mb(self, path: str | Path) -> Path:
+        """Save anomaly memory-bank payload for fast restore without rebuilding support set.
+
+        Args:
+            path (str | Path): Destination file path.
+
+        Returns:
+            Path: Saved file path.
+        """
+        assert isinstance(self.model, YOLOAnomalyModel), "Call setup() before save_mb()."
+        heads_payload = []
+        for h in self.model._get_ad_heads():
+            heads_payload.append(
+                {
+                    "memory_bank": h.memory_bank.detach().cpu(),
+                    "feature_dim": int(h.feature_dim) if h.feature_dim is not None else None,
+                }
+            )
+
+        save_path = Path(path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "format": "admb_cache_v1",
+            "heads": heads_payload,
+            "num_heads": len(heads_payload),
+            "names": dict(self.model.names) if getattr(self.model, "names", None) else None,
+        }
+        torch.save(payload, save_path)
+        return save_path
+
+    def load_mb(self, path: str | Path, freeze: bool = True, verbose: bool = True) -> list[dict]:
+        """Load anomaly memory-bank payload previously saved by save_mb().
+
+        Args:
+            path (str | Path): Cache file path.
+            freeze (bool): Freeze memory-bank updates after loading.
+            verbose (bool): Print loaded stats.
+
+        Returns:
+            list[dict]: Per-head memory stats after loading.
+
+        Raises:
+            FileNotFoundError: If path does not exist.
+            ValueError: If cache format is invalid or incompatible.
+        """
+        from ultralytics.utils import LOGGER
+
+        assert isinstance(self.model, YOLOAnomalyModel), "Call setup() before load_mb()."
+        load_path = Path(path)
+        if not load_path.exists():
+            raise FileNotFoundError(f"Memory-bank cache not found: {load_path}")
+
+        data = torch.load(load_path, map_location="cpu")
+        if not isinstance(data, dict) or data.get("format") != "admb_cache_v1" or "heads" not in data:
+            raise ValueError(f"Invalid memory-bank cache format in {load_path}")
+
+        heads = self.model._get_ad_heads()
+        if len(data["heads"]) != len(heads):
+            raise ValueError(
+                f"Memory-bank head count mismatch: cache={len(data['heads'])}, model={len(heads)}"
+            )
+
+        for h, hdata in zip(heads, data["heads"]):
+            mb = hdata.get("memory_bank", None)
+            if not isinstance(mb, torch.Tensor) or mb.dim() != 2:
+                raise ValueError("Invalid memory_bank tensor in cache payload.")
+            h.memory_bank = mb.to(h.memory_bank.device, dtype=h.memory_bank.dtype)
+            fd = hdata.get("feature_dim", None)
+            h.feature_dim = int(fd) if fd is not None else int(h.memory_bank.shape[1])
+
+        if freeze:
+            self.model.freeze_memory_bank()
+
+        stats = self.model.get_memory_bank_stats()
+        if verbose:
+            LOGGER.info(f"YOLOAnomaly: loaded memory bank cache from {load_path}")
+            for i, s in enumerate(stats):
+                LOGGER.info(f"  Head[{i}]: {s['size']} features, dim={s['feature_dim']}")
+        return stats
+
+    def get_memory_bank_stats(self) -> list[dict]:
+        """
+        Return memory bank statistics for all detection heads.
+
+        Returns:
+            list[dict]: Per-head stats with keys 'size' and 'feature_dim'.
+        """
+        assert isinstance(self.model, YOLOAnomalyModel)
+        return self.model.get_memory_bank_stats()
+
+    def set_ad_params(
+        self,
+        ad_conf: float | None = None,
+        ad_max_det: int | None = None,
+        mode: str | None = None,
+    ) -> None:
+        """Set anomaly-detection inference parameters and optionally switch mode.
+
+        Args:
+            ad_conf (float | None): Confidence threshold for anomaly proposals.
+            ad_max_det (int | None): Maximum number of detections per image.
+            mode (str | None): If provided, switch to this mode ('anomaly' or 'detect').
+        """
+        assert isinstance(self.model, YOLOAnomalyModel), "Call setup() before set_ad_params()."
+        head = self.model.model[-1]
+        assert isinstance(head, AnomalyDetection), "Call setup() before set_ad_params()."
+        head.set_ad_params(ad_conf=ad_conf, ad_max_det=ad_max_det)
+        if mode is not None:
+            self.set_mode(mode)
+
+    def set_mode(self, mode: str) -> None:
+        """
+        Switch between anomaly detection and original classification mode.
+
+        In 'anomaly' mode the model outputs a single anomaly score per region based
+        on cosine distance to the memory bank (nc=1, ignores original class labels).
+        In 'detect' mode the original classification head is restored so the model
+        behaves as a standard detector — useful when the loaded weights already
+        target specific defect classes.
+
+        Call setup() before set_mode().
+
+        Args:
+            mode (str): 'anomaly' for memory-bank scoring, 'detect' for original classes.
+
+        Examples:
+            >>> model.set_mode("detect")   # use original defect class outputs
+            >>> model.set_mode("anomaly")  # switch back to memory-bank scoring
+        """
+        assert mode in ("anomaly", "detect"), f"mode must be 'anomaly' or 'detect', got {mode!r}"
+        assert isinstance(self.model, YOLOAnomalyModel), (
+            "Call setup() before set_mode()."
+        )
+        self.model.set_anomaly_mode(mode == "anomaly")
+        # Propagate updated names to the predictor's AutoBackend if already initialized,
+        # so Results objects created on the next predict() use the correct class names.
+        if self.predictor is not None and getattr(self.predictor, "model", None) is not None:
+            self.predictor.model.names = self.model.names
+
+    def predict(self, source=None, stream: bool = False, **kwargs):
+        """
+        Run anomaly detection on the given source.
+
+        Detections are regions whose anomaly score exceeds the configured threshold.
+        Ensure setup() and load_support_set() have been called beforehand.
+
+        Args:
+            source: Image source for inference.
+            stream (bool): Yield results as a generator instead of a list.
+            **kwargs: Additional keyword arguments passed to the predictor.
+
+        Returns:
+            list[Results] | generator: Anomaly detection results.
+        """
+        return super().predict(source=source, stream=stream, **kwargs)
+

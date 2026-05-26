@@ -1964,6 +1964,11 @@ class ADMBHead(nn.Module):
         cls_feat = self._prepare_cls_feat(cls_feat)
         if self.update:
             self._online_bootstrapped_memory_accumulation(cls_feat, batch_size, height, width, self.accumulate_thresh)
+            # Build-only: heatmap output is discarded by the caller. Skip the
+            # full-bank dense scoring (a major cost, especially on the coreset
+            # fast-path where the bank grows to millions of rows mid-build).
+            nc = 1 if anomaly_mode else self.vocab_linear.out_features
+            return torch.zeros(batch_size, nc, height, width, device=cls_feat.device, dtype=cls_feat.dtype)
 
         if anomaly_mode:
             heatmap = self._anomaly_scores(cls_feat, mem=self._memory_tensor()).view(batch_size, 1, height, width)
@@ -2140,25 +2145,91 @@ class ADMBHead(nn.Module):
         mem = self._effective_memory_bank()
         total_added = 0
 
+        def _scores_from_sim(sim_full: torch.Tensor) -> torch.Tensor:
+            """Inline Noisy-OR over a precomputed cosine-sim matrix [N, M].
+
+            Skips the validation and re-normalisation done by ``_anomaly_scores``;
+            assumes ``sim_full`` is already cosine sim (i.e. inputs were unit-norm).
+            """
+            k = min(self.K, sim_full.shape[1])
+            sim_t = torch.exp(-self.temperature * (1 - sim_full))
+            topk_sim = sim_t.topk(k=k, dim=1).values
+            score = (1 - topk_sim).clamp(min=1e-8)
+            log_prob = torch.log(score).mean(dim=1)
+            return torch.exp(log_prob).clamp(0, 1)
+
         def _run_obma_pass(mem_in: torch.Tensor, is_first_pass: bool):
-            """One E-step: iterate over all images, add novel features to mem_in."""
-            mem = mem_in
+            """One E-step: iterate over all images, add novel features to mem_in.
+
+            Three optimisations over the original per-pixel loop:
+
+            1. Pre-allocate a single ``buf`` with worst-case capacity — avoids
+               O(N^2) realloc churn from per-accept ``torch.cat``.
+            2. **Cache** the per-image cosine-sim matrix against the bank:
+               ``S_bank = cand_feats @ buf[:cur].t()`` is computed once at the
+               start of each image; after every accept we only append ONE
+               column (sim against the just-accepted feature) instead of
+               recomputing the whole matmul.
+            3. Inline scoring (``_scores_from_sim``) bypasses ``_anomaly_scores``'s
+               per-call ``mem.norm()`` filter and ``F.normalize(q)`` — both are
+               wasted work since our inputs and bank are guaranteed unit-norm.
+
+            Semantics: numerically near-identical to the original (tiny
+            FP-ordering drift from batched vs scalar matmul, same as before).
+            """
+            M0 = mem_in.shape[0]
+            feat_dim = all_normed[0].shape[1]
+            device = all_normed[0].device
+            dtype = mem_in.dtype if M0 > 0 else all_normed[0].dtype
+            max_new = sum(n.shape[0] for n in all_normed)
+            buf = torch.empty((M0 + max_new, feat_dim), device=device, dtype=dtype)
+            if M0 > 0:
+                buf[:M0] = mem_in.to(device=device, dtype=dtype)
+            cur = M0
             added = 0
             for b, normed_b in enumerate(all_normed):
-                scores = self._anomaly_scores(normed_b, mem=mem)  # [H*W]
+                scores = self._anomaly_scores(normed_b, mem=buf[:cur])  # [H*W]
                 cand_idx = (scores > accumulate_thresh).nonzero(as_tuple=True)[0]
                 if cand_idx.numel() == 0:
                     continue
                 cand_idx = cand_idx[scores[cand_idx].argsort(descending=True)]
-                cand_feats = normed_b[cand_idx]
-                for i in range(cand_feats.shape[0]):
-                    feat = cand_feats[i : i + 1]
-                    if self._anomaly_scores(feat, mem=mem).item() > accumulate_thresh:
-                        mem = torch.cat((mem, feat.to(mem.device, dtype=mem.dtype)), dim=0)
-                        added += 1
-                        if b == 0 and is_first_pass:
-                            keep_flags[cand_idx[i]] = True
-            return mem, added
+                cand_feats = normed_b[cand_idx]                          # [N, C], unit-norm
+                N = cand_feats.shape[0]
+
+                # Pre-allocate sim matrix [N, cur + N]; reuse view as bank grows.
+                # First ``cur`` cols = sim against existing bank (fixed for this image).
+                # Subsequent cols = sim against this-image accepts (appended one-by-one).
+                S = torch.empty((N, cur + N), device=device, dtype=dtype)
+                if cur > 0:
+                    S[:, :cur] = cand_feats @ buf[:cur].t()
+                M_view = cur                                             # active cols in S
+
+                # First accept: guaranteed (highest initial score > thresh).
+                buf[cur] = cand_feats[0].to(dtype=dtype)
+                # Append sim column: cand_feats @ cand_feats[0]  -> [N]
+                S[:, M_view] = cand_feats @ cand_feats[0]
+                M_view += 1
+                cur += 1
+                added += 1
+                if b == 0 and is_first_pass:
+                    keep_flags[cand_idx[0]] = True
+                pos = 1
+
+                while pos < N:
+                    tail_scores = _scores_from_sim(S[pos:, :M_view])     # [N-pos]
+                    passing = (tail_scores > accumulate_thresh).nonzero(as_tuple=True)[0]
+                    if passing.numel() == 0:
+                        break
+                    j = pos + int(passing[0].item())
+                    buf[cur] = cand_feats[j].to(dtype=dtype)
+                    S[:, M_view] = cand_feats @ cand_feats[j]
+                    M_view += 1
+                    cur += 1
+                    added += 1
+                    if b == 0 and is_first_pass:
+                        keep_flags[cand_idx[j]] = True
+                    pos = j + 1
+            return buf[:cur].clone(), added
 
         def _maybe_calibrate(mem: torch.Tensor) -> bool:
             """M-step: recalibrate β from the current bank if conditions are met.
@@ -2257,6 +2328,22 @@ class ADMBHead(nn.Module):
 
         cls_feat = self._prepare_cls_feat(cls_feat)
 
+        # Build-only fast path: populate the bank via OBMA / coreset fast-path,
+        # skip the dense full-bank scoring used for proposal selection.  The
+        # caller discards Results during bank construction, so emitting empty
+        # proposals here is safe and avoids the dominant matmul cost.
+        if self.update:
+            self._online_bootstrapped_memory_accumulation(cls_feat, B, H, W, self.accumulate_thresh)
+            nc = 1 if anomaly_mode else self.vocab_linear.out_features
+            k = H * W if conf == 0 else 0
+            empty_scores = torch.zeros(B, nc, k, device=cls_feat.device, dtype=cls_feat.dtype)
+            empty_mask = (
+                torch.ones(H * W, dtype=torch.bool, device=cls_feat.device)
+                if conf == 0
+                else torch.zeros(H * W, dtype=torch.bool, device=cls_feat.device)
+            )
+            return self.loc(loc_feat), empty_scores, empty_mask
+
         # compute per-image anomaly scores: [B, H*W]
         scores_per_image = self._anomaly_scores(cls_feat, mem=self._memory_tensor()).view(B, -1)
 
@@ -2275,10 +2362,8 @@ class ADMBHead(nn.Module):
         else:
             scores_hw = scores_per_image.max(dim=0).values  # [H*W] — for mask only
 
-        # accumulate high-confidence normal features into the memory bank (only when self.update is True)
-        if self.update:
-            accumulate_mask = self._online_bootstrapped_memory_accumulation(cls_feat, B, H, W,
-                                                                             self.accumulate_thresh)
+        # (Memory-bank accumulation already happened in the build-only fast path
+        #  above; this branch is inference-only.)
 
         # infer flow — two paths:
         #   conf == 0 (export/dense): return all H*W positions with real scores, no boolean indexing.
@@ -2358,6 +2443,8 @@ class AnomalyDetection(Detect):
             "auto_temperature": True, "calibration_interval": 0, "calibration_target_score": 0.2,
             "min_calibration_bank_size": 50, "em_iters": 1, "max_bank_size": None,
             "score_aggregation": "max", "yolo_weight": 0.0,
+            # Backbone-tap heatmap config (None = disabled, use neck features).
+            "bb_layers": None, "bb_channels": None,
         }
 
         # Auto-build ADMBHead sub-modules when constructed from YAML (not from from_detect_head)
@@ -2379,6 +2466,7 @@ class AnomalyDetection(Detect):
                 "auto_temperature": True, "calibration_interval": 0, "calibration_target_score": 0.2,
                 "min_calibration_bank_size": 50, "em_iters": 1, "max_bank_size": None,
                 "score_aggregation": "max", "yolo_weight": 0.0,
+                "bb_layers": None, "bb_channels": None,
             }
             args = {k: (list(v) if isinstance(v, list) else v) for k, v in _defaults.items()}
             for k in _defaults:
@@ -2472,6 +2560,7 @@ class AnomalyDetection(Detect):
                 "auto_temperature": True, "calibration_interval": 0, "calibration_target_score": 0.2,
                 "min_calibration_bank_size": 50, "em_iters": 1, "max_bank_size": None,
                 "score_aggregation": "max", "yolo_weight": 0.0,
+                "bb_layers": None, "bb_channels": None,
             }
             args = {k: (list(v) if isinstance(v, list) else v) for k, v in _defaults.items()}
             for k in _defaults:
@@ -2628,14 +2717,38 @@ class AnomalyDetection(Detect):
         return torch.cat(aligned, dim=1) if len(aligned) > 1 else aligned[0]
 
     def forward_heatmap(self, x: list[torch.Tensor], cls_heads: nn.ModuleList | None = None) -> torch.Tensor:
-        """Build a dense anomaly heatmap from fused multi-scale features."""
+        """Build a dense anomaly heatmap from fused multi-scale features.
+
+        Source selection:
+          - Default (no backbone taps installed): fuse the head-input features
+            ``x[fused_layers]`` via :meth:`_build_fused_feature_map`.
+          - When the parent model has installed backbone taps via
+            ``YOLOAnomalyModel._install_backbone_taps`` and populated
+            ``self._bb_feats_ref``, fuse those pre-neck backbone features instead.
+            Single tap = direct passthrough; multiple taps are nearest-up-sampled
+            to the first layer's spatial size and concatenated along channels.
+        """
         fused_adhead = getattr(self, "fused_adhead", None)
         if fused_adhead is None:
             raise RuntimeError("Call build_adhead() before forward_heatmap().")
-        if cls_heads is None:
-            _, cls_heads = self._get_feature_heads()
+
+        bb_feats = getattr(self, "_bb_feats_ref", None)
+        bb_indices = getattr(self, "_bb_layer_indices", None)
+        if bb_feats and bb_indices and all(i in bb_feats for i in bb_indices):
+            feats = [bb_feats[i] for i in bb_indices]
+            target_size = feats[0].shape[-2:]
+            aligned = [
+                F.interpolate(f, size=target_size, mode="nearest") if f.shape[-2:] != target_size else f
+                for f in feats
+            ]
+            feat_in = torch.cat(aligned, dim=1) if len(aligned) > 1 else aligned[0]
+        else:
+            if cls_heads is None:
+                _, cls_heads = self._get_feature_heads()
+            feat_in = self._build_fused_feature_map(x, cls_heads)
+
         heatmap = fused_adhead.forward_dense(
-            self._build_fused_feature_map(x, cls_heads),
+            feat_in,
             anomaly_mode=self.anomaly_mode,
             return_logits=self.heatmap_logits,
         )

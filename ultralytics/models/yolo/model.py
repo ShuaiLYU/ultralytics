@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
 import torch
+from torch import nn
 
 from ultralytics.data.build import load_inference_source
 from ultralytics.engine.results import Results
@@ -1465,6 +1467,50 @@ class YOLOAnomaly(Model):
         }.items() if v is not None}
         head.set_anomaly_args(active_layers=active_layers, mode=mode, **kwargs)
 
+    def enable_backbone_heatmap(self, layers: list[int], channels: list[int]) -> None:
+        """Route the fused anomaly heatmap to pre-neck backbone features.
+
+        Installs forward hooks on ``self.model.model[i]`` for each ``i`` in ``layers``
+        (typically a single backbone-stage index such as ``[4]`` for yolo26m's
+        stride-8 backbone output) and rebuilds ``fused_adhead.vocab_linear`` so
+        ``in_features == sum(channels)``.  The fused memory bank is reset because
+        its feature_dim no longer matches the previous source.
+
+        Per-level detection heads are untouched — detection still consumes neck
+        features as trained.  Only the heatmap path (used for pixel-AUROC and
+        the fused-bank inference) switches source.
+
+        Persistence: ``(layers, channels)`` are written into the head's
+        ``anomaly_args`` so they survive ``model.save()`` / reload via
+        :meth:`_restore_anomaly_metadata`.
+
+        Args:
+            layers: Backbone layer indices to tap (e.g. ``[4]`` = stride-8 in yolo26m).
+            channels: Channel count of each tapped layer; must match the runtime
+                tensor shapes.  Pass explicit values from the YAML (e.g. ``[512]``).
+        """
+        assert isinstance(self.model, YOLOAnomalyModel), "Call setup() before enable_backbone_heatmap()."
+        head = self.model.model[-1]
+        assert isinstance(head, AnomalyDetection), "Call setup() before enable_backbone_heatmap()."
+        assert len(layers) == len(channels), "layers and channels must align."
+        # 1. Install / refresh forward hooks.
+        self.model._install_backbone_taps(layers)
+        # 2. Rebuild fused_adhead.vocab_linear to match new in_features.
+        fused = getattr(head, "fused_adhead", None)
+        if fused is None:
+            # _build_fused_head wants an existing vocab to copy nc from; use any per-level head.
+            assert head.adhead is not None, "build_adhead() must run before enable_backbone_heatmap()."
+            head.fused_adhead = head._build_fused_head(copy.deepcopy(head.adhead[0].vocab_linear))
+            fused = head.fused_adhead
+        device = next(head.parameters()).device
+        new_in = int(sum(channels))
+        fused.vocab_linear = nn.Linear(new_in, fused.vocab_linear.out_features, bias=True).to(device)
+        fused.reset_memory_bank()
+        fused.feature_dim = None  # let it auto-set from the first forward
+        # 3. Persist in anomaly_args so save/load round-trips re-install hooks.
+        head.anomaly_args["bb_layers"] = list(layers)
+        head.anomaly_args["bb_channels"] = list(channels)
+
     @property
     def anomaly_args(self) -> dict:
         """Return the current anomaly_args dict from the head for quick inspection."""
@@ -1565,6 +1611,13 @@ class YOLOAnomaly(Model):
                 "anomaly_args": dict(head.anomaly_args),
             }
 
+        # Strip backbone-tap hooks before deepcopy — their closures are not
+        # picklable.  bb_layers/bb_channels live in anomaly_meta so the hooks
+        # are re-installed automatically when the .pt is loaded.
+        bb_layers_snapshot = head.anomaly_args.get("bb_layers") if isinstance(head, AnomalyDetection) else None
+        if bb_layers_snapshot and isinstance(self.model, YOLOAnomalyModel):
+            self.model._remove_backbone_taps()
+
         updates = {
             "model": deepcopy(self.model).half() if isinstance(self.model, torch.nn.Module) else self.model,
             "date": datetime.now().isoformat(),
@@ -1574,6 +1627,10 @@ class YOLOAnomaly(Model):
             "anomaly_meta": anomaly_meta,
         }
         torch.save({**self.ckpt, **updates}, filename)
+
+        # Re-install hooks for the live model (we only stripped to make save work).
+        if bb_layers_snapshot:
+            self.model._install_backbone_taps(list(bb_layers_snapshot))
 
     def _restore_anomaly_metadata(self) -> None:
         """Restore anomaly detection state from checkpoint metadata if available.
@@ -1621,6 +1678,15 @@ class YOLOAnomaly(Model):
                     self.model.names = {0: list(self.model._anomaly_names.values())[0]}
                 else:
                     self.model.names = self.model._original_names
+
+                # If checkpoint was saved with backbone-tap heatmap enabled, re-install hooks.
+                bb_layers = head.anomaly_args.get("bb_layers")
+                bb_channels = head.anomaly_args.get("bb_channels")
+                if bb_layers and bb_channels:
+                    # Re-install hooks but do NOT rebuild vocab_linear: the saved
+                    # checkpoint already has the right shape (Linear weights are
+                    # part of state_dict).  Just wire up the dict reference.
+                    self.model._install_backbone_taps(list(bb_layers))
 
             # Freeze memory bank (loaded model should not accumulate)
             self.model.freeze_memory_bank()

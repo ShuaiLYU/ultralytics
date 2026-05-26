@@ -1568,6 +1568,57 @@ class YOLOAnomalyModel(DetectionModel):
         """Not supported — YOLOAnomalyModel is training-free."""
         raise NotImplementedError("YOLOAnomalyModel does not support training.")
 
+    # ── Backbone-feature tap (for alternative anomaly heatmap source) ──────────
+    def _install_backbone_taps(self, layer_indices: list[int]) -> None:
+        """Register forward hooks that capture backbone-layer outputs into a dict.
+
+        After install, every forward pass populates ``self._bb_feats[idx] = output``
+        for each ``idx`` in ``layer_indices``.  The AnomalyDetection head reads from
+        this dict (via ``head._bb_feats_ref``) inside ``forward_heatmap`` so the
+        fused anomaly heatmap can be computed from pre-neck backbone features
+        instead of the post-neck features the detection head normally consumes.
+
+        Idempotent: removes any previously-installed taps first.
+        """
+        # Remove old hooks if any.
+        for h in getattr(self, "_bb_hook_handles", []):
+            h.remove()
+        self._bb_hook_handles: list = []
+        self._bb_feats: dict[int, "torch.Tensor"] = {}
+
+        def _make_hook(idx: int):
+            def _hook(module, inp, out):
+                self._bb_feats[idx] = out
+            return _hook
+
+        for idx in layer_indices:
+            handle = self.model[idx].register_forward_hook(_make_hook(idx))
+            self._bb_hook_handles.append(handle)
+
+        # Wire the dict reference into the AnomalyDetection head.
+        head = self.model[-1]
+        if isinstance(head, AnomalyDetection):
+            head._bb_feats_ref = self._bb_feats
+            head._bb_layer_indices = list(layer_indices)
+
+    def _remove_backbone_taps(self) -> None:
+        """Remove all installed forward hooks (called before pickling/deepcopy).
+
+        Hook closures cannot be pickled.  The (layers, channels) config lives in
+        ``head.anomaly_args`` and is re-applied by
+        ``_restore_anomaly_metadata`` on reload, so removing the runtime hooks
+        loses nothing persistent.
+        """
+        for h in getattr(self, "_bb_hook_handles", []):
+            h.remove()
+        self._bb_hook_handles = []
+        if hasattr(self, "_bb_feats"):
+            self._bb_feats.clear()
+        head = self.model[-1]
+        if isinstance(head, AnomalyDetection):
+            head._bb_feats_ref = None
+            head._bb_layer_indices = None
+
 
 # Functions ------------------------------------------------------------------------------------------------------------
 

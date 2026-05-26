@@ -1,0 +1,55 @@
+# Backbone-L6 fused heatmap @ imgsz=320 — current best on MVTec leather.
+# Cache: runs/temp/yoloa_cache/yoloa_l6_320/
+
+base_model: /Users/louis/workspace/ultra_louis_work/ultra6/runs/yoloa/26m_mergedata_v3/weights/best.pt
+
+
+# ── model.val() / model.predict() kwargs (forward-pass inference) ──────────
+model_arg:
+  imgsz: 320
+  conf: 0.001          # very low — proper mAP calculation lets ad_conf inside the head filter
+  iou: 0.001
+  max_det: 1000
+  single_cls: true
+  rect: false
+  plots: false
+  verbose: false
+  agnostic_nms: true   # match val pipeline's NMS for predict
+
+
+# ── set_anomaly_args(**anomaly_arg) — head configuration ───────────────────
+anomaly_arg:
+  # Mode + feature path
+  mode: anomaly                # 'anomaly' (nc=1) or 'detect' (nc=original_nc)
+  feature_mode: per_level      # 'per_level' or 'fused_heatmap' (inference path)
+  active_layers: [0, 1, 2]     # which per-level heads contribute proposals
+
+  # Fused heatmap config (used when feature_mode='fused_heatmap' or when fused_adhead exists)
+  fused_layers: [0]
+  fused_use_pre_clshead: true
+  return_heatmap: true
+
+  # Inference thresholds
+  ad_conf: 0.5
+  ad_max_det: 10
+
+  # OBMA bank construction & calibration
+  accumulate_thresh: 0.3
+  auto_temperature: true
+  em_iters: 1
+  calibration_interval: 1
+  calibration_target_score: 0.2
+  score_filter_kernel: 1
+
+  # Coreset fast-path (null = OBMA, int = bypass OBMA + k-center compress to N)
+  max_bank_size: null
+
+  # Backbone heatmap tap (special: handled by enable_backbone_heatmap, not set_anomaly_args)
+  bb_heatmap_layers: [6]
+  bb_heatmap_channels: [512]
+
+
+# ── Memory bank construction budget (not passed to set_anomaly_args) ───────
+build:
+  support_cap: 2000
+  support_batch: 4

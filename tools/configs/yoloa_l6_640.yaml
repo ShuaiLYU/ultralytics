@@ -1,0 +1,46 @@
+# Backbone-L6 fused heatmap @ imgsz=640 — same as yoloa_l6_320 but higher resolution.
+# Cache: runs/temp/yoloa_cache/yoloa_l6_640/
+
+base_model: /Users/louis/workspace/ultra_louis_work/ultra6/runs/yoloa/26m_mergedata_v3/weights/best.pt
+
+
+model_arg:
+  imgsz: 640
+  conf: 0.001
+  iou: 0.001
+  max_det: 1000
+  single_cls: true
+  rect: false
+  plots: false
+  verbose: false
+  agnostic_nms: true
+
+
+anomaly_arg:
+  mode: anomaly
+  feature_mode: per_level
+  active_layers: [0, 1, 2]
+
+  fused_layers: [0]
+  fused_use_pre_clshead: true
+  return_heatmap: true
+
+  ad_conf: 0.5
+  ad_max_det: 10
+
+  accumulate_thresh: 0.3
+  auto_temperature: true
+  em_iters: 1
+  calibration_interval: 1
+  calibration_target_score: 0.2
+  score_filter_kernel: 1
+
+  max_bank_size: null
+
+  bb_heatmap_layers: [6]
+  bb_heatmap_channels: [512]
+
+
+build:
+  support_cap: 2000
+  support_batch: 4

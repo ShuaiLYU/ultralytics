@@ -31,10 +31,10 @@ import yaml
 from ultra_ext.yoloa import MVTEC_CATEGORIES, DAGM_CATEGORIES, get_mvtec_yolo_data
 
 
-# Where per-config caches live.
+# Where per-config caches live.  Each config gets a subdir under this root, and
+# all artifacts (cached .pt files, val_results.csv, predict_<cat>/) live inside
+# that subdir so a config is fully self-contained.
 DEFAULT_CACHE_ROOT = Path("./runs/temp/yoloa_cache")
-DEFAULT_OUT_CSV = Path("./runs/temp/val_anomaly.csv")
-DEFAULT_VIS_OUT_ROOT = Path("./runs/temp")
 
 
 # ── Dataset registry ───────────────────────────────────────────────────────
@@ -150,8 +150,22 @@ def load_config(path: str | Path) -> dict:
 
 
 def cache_dir_for(cfg: dict) -> Path:
-	"""Per-config cache subdir: ``runs/temp/yoloa_cache/<config_name>/``."""
+	"""Per-config cache subdir: ``runs/temp/yoloa_cache/<config_name>/``.
+
+	This is where the cached ``.pt`` files live AND where val_yoloa.py writes
+	``val_results.csv`` and predict_yoloa.py writes ``predict_<cat>/``.
+	"""
 	return DEFAULT_CACHE_ROOT / cfg["_name"]
+
+
+def val_csv_for(cfg: dict) -> Path:
+	"""Default CSV path for val metrics: ``<cache_dir>/val_results.csv``."""
+	return cache_dir_for(cfg) / "val_results.csv"
+
+
+def predict_dir_for(cfg: dict, category: str) -> Path:
+	"""Default predict output dir: ``<cache_dir>/predict_<category>/``."""
+	return cache_dir_for(cfg) / f"predict_{category}"
 
 
 def anomaly_arg_for_set(cfg: dict) -> dict:

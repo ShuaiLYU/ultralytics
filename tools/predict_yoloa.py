@@ -34,8 +34,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _anomaly_common import (
-	DEFAULT_VIS_OUT_ROOT, add_category_args, cache_dir_for, load_config,
-	parse_categories, resolve_category,
+	add_category_args, cache_dir_for, load_config, parse_categories,
+	predict_dir_for, resolve_category,
 )
 
 from ultra_ext.yoloa import load_yoloa, read_yolo_label
@@ -125,8 +125,8 @@ def _build_composite(src_path: Path, *, mode: str, yolo_model, yoloa_model,
 	is_anom = len(gts) > 0
 
 	panels: list[tuple[str, np.ndarray]] = []
-	if mode == "both":
-		panels.append((f"GT ({len(gts)})", _draw_gt(img_bgr, gts)))
+	# Always include GT as the first panel for easy reference.
+	panels.append((f"GT ({len(gts)})", _draw_gt(img_bgr, gts)))
 	if mode in ("yolo", "both"):
 		r = yolo_model.predict(str(src_path), **pred_kw)[0]
 		panels.append((f"YOLO ({len(r.boxes)})", r.plot()))
@@ -224,7 +224,7 @@ def main():
 
 		# Output dir.
 		out_dir = Path(args.out_dir).resolve() if args.out_dir \
-			else (DEFAULT_VIS_OUT_ROOT / f"predict_{tag}").resolve()
+			else predict_dir_for(cfg, tag).resolve()
 		out_dir.mkdir(parents=True, exist_ok=True)
 		print(f"\n=== {tag}: {len(sources)} image(s) → {out_dir} ===")
 

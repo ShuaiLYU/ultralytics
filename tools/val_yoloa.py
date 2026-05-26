@@ -15,8 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _anomaly_common import (
-	DEFAULT_OUT_CSV, add_category_args, cache_dir_for, load_config,
-	parse_categories, resolve_category,
+	add_category_args, cache_dir_for, load_config, parse_categories,
+	resolve_category, val_csv_for,
 )
 
 from ultra_ext.yoloa import (
@@ -28,13 +28,15 @@ def main():
 	p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
 	add_category_args(p)
 	p.add_argument("--mode", choices=["yolo", "yoloa", "both"], default="both")
-	p.add_argument("--csv", default=str(DEFAULT_OUT_CSV))
+	p.add_argument("--csv", default=None,
+	               help="Output CSV (default: <cache_dir>/val_results.csv).")
 	p.add_argument("--ad-conf", type=float, default=None,
 	               help="Override config's anomaly_arg.ad_conf at load time.")
 	args = p.parse_args()
 
 	cfg = load_config(args.config)
 	cache_dir = cache_dir_for(cfg)
+	csv_path = Path(args.csv) if args.csv else val_csv_for(cfg)
 	val_kw = dict(cfg["model_arg"])     # forwarded to model.val()
 	val_kw.pop("agnostic_nms", None)    # val handles NMS internally; not a val() kwarg
 	names = parse_categories(args)
@@ -82,7 +84,8 @@ def main():
 
 	title = f"Anomaly val  (config={cfg['_name']}, mode={args.mode})"
 	print_metric_table(rows, title=title, name_width=28)
-	saved = save_metric_csv(rows, args.csv)
+	csv_path.parent.mkdir(parents=True, exist_ok=True)
+	saved = save_metric_csv(rows, csv_path)
 	print(f"\nSaved → {saved}")
 
 

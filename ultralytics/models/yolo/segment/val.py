@@ -90,6 +90,29 @@ class SegmentationValidator(DetectionValidator):
             "mAP50-95)",
         )
 
+    def print_results(self) -> None:
+        """Print mean and per-class metrics in the legacy single-row layout (Box4 + Mask4 cols).
+
+        Detection's `print_results` was widened to surface a second P/R at args.conf, but the seg/pose
+        printable tables are already very wide; we keep them on the legacy mean_results path to avoid
+        the row exploding to 12+ numeric columns.
+        """
+        pf = "%22s" + "%11i" * 2 + "%11.3g" * len(self.metrics.keys)
+        LOGGER.info(pf % ("all", self.seen, self.metrics.nt_per_class.sum(), *self.metrics.mean_results()))
+        if self.metrics.nt_per_class.sum() == 0:
+            LOGGER.warning(f"no labels found in {self.args.task} set, cannot compute metrics without labels")
+        if self.args.verbose and not self.training and self.nc > 1:
+            for i, c in enumerate(self.metrics.ap_class_index):
+                LOGGER.info(
+                    pf
+                    % (
+                        self.names[c],
+                        self.metrics.nt_per_image[c],
+                        self.metrics.nt_per_class[c],
+                        *self.metrics.class_result(i),
+                    )
+                )
+
     def postprocess(self, preds: list[torch.Tensor]) -> list[dict[str, torch.Tensor]]:
         """Post-process YOLO predictions and return output detections with proto.
 

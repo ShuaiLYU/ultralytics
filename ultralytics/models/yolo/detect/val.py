@@ -101,8 +101,23 @@ class DetectionValidator(BaseValidator):
         self.confusion_matrix = ConfusionMatrix(names=model.names, save_matches=self.args.plots and self.args.visualize)
 
     def get_desc(self) -> str:
-        """Return a formatted string summarizing class metrics of YOLO model."""
-        return ("%22s" + "%11s" * 6) % ("Class", "Images", "Instances", "Box(P", "R", "mAP50", "mAP50-95)")
+        """Return a formatted string summarizing class metrics of YOLO model.
+
+        Columns: two P/R pairs — `P(F1)/R(F1)` at the F1-optimal conf (Ultralytics default), and `P(c)/R(c)`
+        at args.conf (deployment-style threshold). Both are evaluated at IoU=0.5. A header line printed
+        right before the data row makes the exact conf values explicit.
+        """
+        return ("%22s" + "%11s" * 8) % (
+            "Class",
+            "Images",
+            "Instances",
+            "Box(P(F1)",
+            "R(F1)",
+            "P(c)",
+            "R(c)",
+            "mAP50",
+            "mAP50-95)",
+        )
 
     def postprocess(self, preds: torch.Tensor) -> list[dict[str, torch.Tensor]]:
         """Apply Non-maximum suppression to prediction outputs.
@@ -276,9 +291,26 @@ class DetectionValidator(BaseValidator):
         return self.metrics.results_dict
 
     def print_results(self) -> None:
-        """Print training/validation set metrics per class."""
-        pf = "%22s" + "%11i" * 2 + "%11.3g" * len(self.metrics.keys)  # print format
-        LOGGER.info(pf % ("all", self.seen, self.metrics.nt_per_class.sum(), *self.metrics.mean_results()))
+        """Print training/validation set metrics per class.
+
+        Each row reports two P/R pairs in one line:
+          - P(F1)/R(F1) at the F1-optimal conf
+          - P(c)/R(c) at args.conf (deployment threshold)
+        A header line printed first marks the exact `conf=*, iou=*` values used for each pair.
+        """
+        usr_conf = float(self.args.conf)
+        f1_conf = self.metrics.box.max_f1_conf
+        LOGGER.info(f"P/R marks:  (F1) conf={f1_conf:.3g}, iou=0.5  |  (c) conf={usr_conf:.3g}, iou=0.5")
+        pf = "%22s" + "%11i" * 2 + "%11.3g" * 6  # 6 numeric cols: P(F1) R(F1) P(c) R(c) mAP50 mAP50-95
+        LOGGER.info(
+            pf
+            % (
+                "all",
+                self.seen,
+                self.metrics.nt_per_class.sum(),
+                *self.metrics.mean_row(usr_conf),
+            )
+        )
         if self.metrics.nt_per_class.sum() == 0:
             LOGGER.warning(f"no labels found in {self.args.task} set, cannot compute metrics without labels")
 
@@ -291,7 +323,7 @@ class DetectionValidator(BaseValidator):
                         self.names[c],
                         self.metrics.nt_per_image[c],
                         self.metrics.nt_per_class[c],
-                        *self.metrics.class_result(i),
+                        *self.metrics.class_row(i, usr_conf),
                     )
                 )
 

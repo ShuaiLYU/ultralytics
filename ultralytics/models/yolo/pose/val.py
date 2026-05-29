@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from ultralytics.models.yolo.detect import DetectionValidator
-from ultralytics.utils import ops
+from ultralytics.utils import LOGGER, ops
 from ultralytics.utils.metrics import OKS_SIGMA, PoseMetrics, kpt_iou
 
 
@@ -91,6 +91,28 @@ class PoseValidator(DetectionValidator):
             "mAP50",
             "mAP50-95)",
         )
+
+    def print_results(self) -> None:
+        """Print mean and per-class metrics in the legacy single-row layout (Box4 + Pose4 cols).
+
+        See `SegmentationValidator.print_results` for why pose/seg keep the legacy printer instead of
+        inheriting detection's widened two-P/R-pair layout.
+        """
+        pf = "%22s" + "%11i" * 2 + "%11.3g" * len(self.metrics.keys)
+        LOGGER.info(pf % ("all", self.seen, self.metrics.nt_per_class.sum(), *self.metrics.mean_results()))
+        if self.metrics.nt_per_class.sum() == 0:
+            LOGGER.warning(f"no labels found in {self.args.task} set, cannot compute metrics without labels")
+        if self.args.verbose and not self.training and self.nc > 1:
+            for i, c in enumerate(self.metrics.ap_class_index):
+                LOGGER.info(
+                    pf
+                    % (
+                        self.names[c],
+                        self.metrics.nt_per_image[c],
+                        self.metrics.nt_per_class[c],
+                        *self.metrics.class_result(i),
+                    )
+                )
 
     def init_metrics(self, model: torch.nn.Module) -> None:
         """Initialize evaluation metrics for YOLO pose validation.

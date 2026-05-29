@@ -986,6 +986,46 @@ class Metric(SimpleClass):
         """Return mean of results, mp, mr, map50, map."""
         return [self.mp, self.mr, self.map50, self.map]
 
+    @property
+    def max_f1_conf(self) -> float:
+        """Confidence threshold at which the reported P/R/F1 are evaluated (max mean-F1 point)."""
+        if not len(self.f1_curve) or not len(self.px):
+            return 0.0
+        i = smooth(self.f1_curve.mean(0), 0.1).argmax()
+        return float(self.px[i])
+
+    def values_at_conf(self, conf: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Per-class (precision, recall, F1) at a user-specified confidence threshold."""
+        if not len(self.f1_curve) or not len(self.px):
+            z = np.zeros(self.nc)
+            return z, z, z
+        # px is np.linspace(0, 1, 1000); pick nearest index.
+        i = int(np.clip(round(float(conf) * (len(self.px) - 1)), 0, len(self.px) - 1))
+        return self.p_curve[:, i], self.r_curve[:, i], self.f1_curve[:, i]
+
+    def mean_row(self, conf: float) -> list[float]:
+        """Single mean-results row exposing P/R at both the F1-optimal and user-specified conf points.
+
+        Returns [P(F1), R(F1), P(conf), R(conf), mAP50, mAP50-95]. mAP columns are curve-integrated and
+        independent of conf; P/R are evaluated at IoU=0.5 (first column of the IoU sweep).
+        """
+        p_u, r_u, _ = self.values_at_conf(conf)
+        mp_u = float(p_u.mean()) if len(p_u) else 0.0
+        mr_u = float(r_u.mean()) if len(r_u) else 0.0
+        return [self.mp, self.mr, mp_u, mr_u, self.map50, self.map]
+
+    def class_row(self, i: int, conf: float) -> list[float]:
+        """Per-class row matching `mean_row` shape: [P(F1)[i], R(F1)[i], P(conf)[i], R(conf)[i], ap50[i], ap[i]]."""
+        p_u, r_u, _ = self.values_at_conf(conf)
+        return [
+            float(self.p[i]),
+            float(self.r[i]),
+            float(p_u[i]) if i < len(p_u) else 0.0,
+            float(r_u[i]) if i < len(r_u) else 0.0,
+            float(self.ap50[i]),
+            float(self.ap[i]),
+        ]
+
     def class_result(self, i: int) -> tuple[float, float, float, float]:
         """Return class-aware result, p[i], r[i], ap50[i], ap[i]."""
         return self.p[i], self.r[i], self.ap50[i], self.ap[i]
@@ -1186,6 +1226,14 @@ class DetMetrics(SimpleClass, DataExportMixin):
     def mean_results(self) -> list[float]:
         """Calculate mean of detected objects & return precision, recall, mAP50, and mAP50-95."""
         return self.box.mean_results()
+
+    def mean_row(self, conf: float) -> list[float]:
+        """Expanded mean row exposing P/R at both F1-optimal and `conf`; mAP columns unchanged."""
+        return self.box.mean_row(conf)
+
+    def class_row(self, i: int, conf: float) -> list[float]:
+        """Expanded per-class row matching `mean_row` shape."""
+        return self.box.class_row(i, conf)
 
     def class_result(self, i: int) -> tuple[float, float, float, float]:
         """Return the result of evaluating the performance of an object detection model on a specific class."""

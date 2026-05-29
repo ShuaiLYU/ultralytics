@@ -2061,6 +2061,9 @@ class ADMBHead(nn.Module):
         q = F.normalize(features.view(-1, self.feature_dim), p=2, dim=1)
 
         N = q.shape[0]
+
+        self.K =5 # TODO: expose as a config param, or auto-calibrate per-query from the sim distribution (e.g. all entries above a certain similarity threshold).
+
         k = min(self.K, mem.shape[0])
         prob = torch.empty(N, device=q.device, dtype=q.dtype)
 
@@ -2354,6 +2357,7 @@ class ADMBHead(nn.Module):
         #
         # If yolo_weight > 0, also blend YOLO head probability into the *mask* score so
         # this parameter affects proposal selection, not only post-mask logits.
+        self.yolo_weight=0.5 # TODO: expose as a config param
         if anomaly_mode and self.yolo_weight > 0:
             cls_flat_all = cls_feat.flatten(2).transpose(-1, -2)                         # [B, H*W, C]
             yolo_prob_all = torch.sigmoid(self.vocab_linear(cls_flat_all).max(dim=-1).values)  # [B, H*W]
@@ -2444,7 +2448,7 @@ class AnomalyDetection(Detect):
             "min_calibration_bank_size": 50, "em_iters": 1, "max_bank_size": None,
             "score_aggregation": "max", "yolo_weight": 0.0,
             # Backbone-tap heatmap config (None = disabled, use neck features).
-            "bb_layers": None, "bb_channels": None,
+            "bb_layers": None, "bb_channels": None, "pl_bb_layers": None, "pl_bb_channels": None,
         }
 
         # Auto-build ADMBHead sub-modules when constructed from YAML (not from from_detect_head)
@@ -2466,7 +2470,7 @@ class AnomalyDetection(Detect):
                 "auto_temperature": True, "calibration_interval": 0, "calibration_target_score": 0.2,
                 "min_calibration_bank_size": 50, "em_iters": 1, "max_bank_size": None,
                 "score_aggregation": "max", "yolo_weight": 0.0,
-                "bb_layers": None, "bb_channels": None,
+                "bb_layers": None, "bb_channels": None, "pl_bb_layers": None, "pl_bb_channels": None,
             }
             args = {k: (list(v) if isinstance(v, list) else v) for k, v in _defaults.items()}
             for k in _defaults:
@@ -2560,7 +2564,7 @@ class AnomalyDetection(Detect):
                 "auto_temperature": True, "calibration_interval": 0, "calibration_target_score": 0.2,
                 "min_calibration_bank_size": 50, "em_iters": 1, "max_bank_size": None,
                 "score_aggregation": "max", "yolo_weight": 0.0,
-                "bb_layers": None, "bb_channels": None,
+                "bb_layers": None, "bb_channels": None, "pl_bb_layers": None, "pl_bb_channels": None,
             }
             args = {k: (list(v) if isinstance(v, list) else v) for k, v in _defaults.items()}
             for k in _defaults:
@@ -2818,9 +2822,20 @@ class AnomalyDetection(Detect):
         if isinstance(_fused, ADMBHead) and (_fused.update or _fused.memory_bank.shape[0] > 0):
             heatmap = self.forward_heatmap(x, cls_heads=cv3)
 
+        # Per-level backbone tap: when enable_backbone_per_level() has run, each
+        # adhead[i] scores against the BACKBONE feature at the matched stride
+        # (e.g. P3'/P4'/P5' → backbone layer 4/6/10), not the neck cv3 output.
+        # The bbox-decode path (cv2 + loc) stays on neck features.
+        pl_bb_feats = getattr(self, "_bb_feats_ref", None)
+        pl_bb_indices = getattr(self, "_pl_bb_layer_indices", None)
+        use_pl_bb = bool(pl_bb_feats and pl_bb_indices and len(pl_bb_indices) == self.nl)
+
         boxes, scores, index = [], [], []
         for i in range(self.nl):
-            cls_feat = cv3[i](x[i])
+            if use_pl_bb and pl_bb_indices[i] in pl_bb_feats:
+                cls_feat = pl_bb_feats[pl_bb_indices[i]]
+            else:
+                cls_feat = cv3[i](x[i])
             loc_feat = cv2[i](x[i])
             box, score, idx = self.adhead[i](
                 cls_feat,

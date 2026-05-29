@@ -59,7 +59,7 @@ def main():
 		# Plain YOLO baseline
 		if args.mode in ("yolo", "both"):
 			try:
-				m = val_plain_yolo(info["yaml"], base_model=cfg["base_model"])
+				m = val_plain_yolo(info["yaml"], base_model=cfg["base_model"], **val_kw)
 				rows.append({"name": f"{tag}/yolo", "n_val": info["n_val"], **m})
 			except Exception as e:  # noqa: BLE001
 				print(f"[{tag}/yolo]  FAILED: {e!r}")

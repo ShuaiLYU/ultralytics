@@ -1,0 +1,57 @@
+# Full backbone tap @ imgsz=320 — both per-level proposal scoring AND fused heatmap
+# use pre-neck backbone features.  Detection bbox decode still uses neck loc head.
+#
+# Per-level adhead[i] cls path: backbone layer 4 / 6 / 10 (stride 8 / 16 / 32, 512ch each)
+# Fused heatmap path:           backbone layer 6 (single, 512ch)
+#
+# Cache: runs/temp/yoloa_cache/yoloa_full_bb_320/
+
+base_model: yolo26m.pt
+
+
+model_arg:
+  imgsz: 320
+  conf: 0.001
+  iou: 0.001
+  max_det: 1000
+  single_cls: true
+  rect: false
+  plots: false
+  verbose: false
+  agnostic_nms: true
+
+
+anomaly_arg:
+  mode: anomaly
+  feature_mode: per_level
+  active_layers: [0, 1, 2]
+
+  fused_layers: [0]
+  fused_use_pre_clshead: true
+  return_heatmap: true
+
+  ad_conf: 0.5
+  ad_max_det: 10
+
+  accumulate_thresh: 0.3
+  auto_temperature: true
+  em_iters: 1
+  calibration_interval: 1
+  calibration_target_score: 0.2
+  score_filter_kernel: 1
+
+  max_bank_size: null
+
+  # Fused heatmap tap (single layer).
+  bb_heatmap_layers: [6]
+  bb_heatmap_channels: [512]
+
+  # Per-level proposal tap (one per per-level head, aligned by stride).
+  # P3' ↔ layer 4 (s=8), P4' ↔ layer 6 (s=16), P5' ↔ layer 10 (s=32)
+  pl_bb_heatmap_layers: [4, 6, 10]
+  pl_bb_heatmap_channels: [512, 512, 512]
+
+
+build:
+  support_cap: 2000
+  support_batch: 4

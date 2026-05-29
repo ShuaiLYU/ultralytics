@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _anomaly_common import (
 	add_category_args, anomaly_arg_for_set, bb_heatmap_for, cache_dir_for,
-	load_config, parse_categories, resolve_category,
+	load_config, parse_categories, pl_bb_heatmap_for, resolve_category,
 )
 
 from ultra_ext.yoloa import get_or_build_yoloa, yoloa_cache_path
@@ -34,6 +34,7 @@ def main():
 	cache_dir.mkdir(parents=True, exist_ok=True)
 	build_overrides = anomaly_arg_for_set(cfg)
 	bb_heatmap = bb_heatmap_for(cfg)
+	pl_bb_heatmap = pl_bb_heatmap_for(cfg)
 	imgsz = cfg["model_arg"]["imgsz"]
 	build_cfg = cfg["build"]
 	names = parse_categories(args)
@@ -44,6 +45,8 @@ def main():
 	print(f"imgsz      : {imgsz}    rebuild={args.rebuild}")
 	if bb_heatmap:
 		print(f"bb_heatmap : layers={bb_heatmap[0]}  channels={bb_heatmap[1]}")
+	if pl_bb_heatmap:
+		print(f"pl_bb_heat : layers={pl_bb_heatmap[0]}  channels={pl_bb_heatmap[1]}")
 	print(f"Categories : {names}")
 
 	for name in names:
@@ -68,6 +71,7 @@ def main():
 				support_cap=build_cfg["support_cap"],
 				support_batch=build_cfg["support_batch"],
 				bb_heatmap=bb_heatmap,
+				pl_bb_heatmap=pl_bb_heatmap,
 				imgsz=imgsz,
 				verbose=True,
 			)

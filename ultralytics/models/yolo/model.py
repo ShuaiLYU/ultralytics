@@ -1493,8 +1493,9 @@ class YOLOAnomaly(Model):
         head = self.model.model[-1]
         assert isinstance(head, AnomalyDetection), "Call setup() before enable_backbone_heatmap()."
         assert len(layers) == len(channels), "layers and channels must align."
-        # 1. Install / refresh forward hooks.
-        self.model._install_backbone_taps(layers)
+        # 1. Record fused-heatmap tap indices on head, then refresh hooks (union with per-level).
+        head._bb_layer_indices = list(layers)
+        self.model._refresh_backbone_taps()
         # 2. Rebuild fused_adhead.vocab_linear to match new in_features.
         fused = getattr(head, "fused_adhead", None)
         if fused is None:
@@ -1506,10 +1507,48 @@ class YOLOAnomaly(Model):
         new_in = int(sum(channels))
         fused.vocab_linear = nn.Linear(new_in, fused.vocab_linear.out_features, bias=True).to(device)
         fused.reset_memory_bank()
-        fused.feature_dim = None  # let it auto-set from the first forward
-        # 3. Persist in anomaly_args so save/load round-trips re-install hooks.
+        fused.feature_dim = None
+        # 3. Persist in anomaly_args.
         head.anomaly_args["bb_layers"] = list(layers)
         head.anomaly_args["bb_channels"] = list(channels)
+
+    def enable_backbone_per_level(self, layers: list[int], channels: list[int]) -> None:
+        """Route the per-level proposal scoring to pre-neck backbone features.
+
+        For each detection level i ∈ [0..nl-1], replaces ``cv3[i](x[i])`` (neck
+        post-projection 256ch) with ``backbone[layers[i]]`` (e.g. 512ch raw
+        backbone feature at the matching stride) for the OBMA scoring step.
+        The bbox-decode path (cv2 + loc) stays on neck features.
+
+        Each ``adhead[i].vocab_linear`` is rebuilt to ``in_features = channels[i]``
+        and its memory bank is reset.  Forward hooks are installed on the union
+        of the heatmap and per-level layers.
+
+        Args:
+            layers: Backbone layer indices, one per per-level head (length must
+                equal ``head.nl``, typically 3).  E.g. ``[4, 6, 10]`` taps
+                stride 8/16/32 backbone outputs in yolo26m.
+            channels: Channel count per tapped layer.  Must align with layers.
+        """
+        assert isinstance(self.model, YOLOAnomalyModel), "Call setup() before enable_backbone_per_level()."
+        head = self.model.model[-1]
+        assert isinstance(head, AnomalyDetection), "Call setup() before enable_backbone_per_level()."
+        assert head.adhead is not None, "build_adhead() must run before enable_backbone_per_level()."
+        assert len(layers) == len(channels) == head.nl, \
+            f"layers and channels must have length {head.nl} (one per per-level head)."
+        # 1. Record per-level tap indices on head, then refresh hooks.
+        head._pl_bb_layer_indices = list(layers)
+        self.model._refresh_backbone_taps()
+        # 2. Rebuild each adhead[i].vocab_linear with the new in_features and reset bank.
+        device = next(head.parameters()).device
+        for i, ch in enumerate(channels):
+            ad = head.adhead[i]
+            ad.vocab_linear = nn.Linear(int(ch), ad.vocab_linear.out_features, bias=True).to(device)
+            ad.reset_memory_bank()
+            ad.feature_dim = None
+        # 3. Persist in anomaly_args.
+        head.anomaly_args["pl_bb_layers"] = list(layers)
+        head.anomaly_args["pl_bb_channels"] = list(channels)
 
     @property
     def anomaly_args(self) -> dict:
@@ -1612,10 +1651,12 @@ class YOLOAnomaly(Model):
             }
 
         # Strip backbone-tap hooks before deepcopy — their closures are not
-        # picklable.  bb_layers/bb_channels live in anomaly_meta so the hooks
-        # are re-installed automatically when the .pt is loaded.
-        bb_layers_snapshot = head.anomaly_args.get("bb_layers") if isinstance(head, AnomalyDetection) else None
-        if bb_layers_snapshot and isinstance(self.model, YOLOAnomalyModel):
+        # picklable.  Tap config (bb_layers / pl_bb_layers) lives in anomaly_meta
+        # so hooks are re-installed automatically when the .pt is loaded.
+        has_taps = isinstance(head, AnomalyDetection) and (
+            head.anomaly_args.get("bb_layers") or head.anomaly_args.get("pl_bb_layers")
+        )
+        if has_taps and isinstance(self.model, YOLOAnomalyModel):
             self.model._remove_backbone_taps()
 
         updates = {
@@ -1629,8 +1670,8 @@ class YOLOAnomaly(Model):
         torch.save({**self.ckpt, **updates}, filename)
 
         # Re-install hooks for the live model (we only stripped to make save work).
-        if bb_layers_snapshot:
-            self.model._install_backbone_taps(list(bb_layers_snapshot))
+        if has_taps:
+            self.model._refresh_backbone_taps()
 
     def _restore_anomaly_metadata(self) -> None:
         """Restore anomaly detection state from checkpoint metadata if available.
@@ -1679,14 +1720,18 @@ class YOLOAnomaly(Model):
                 else:
                     self.model.names = self.model._original_names
 
-                # If checkpoint was saved with backbone-tap heatmap enabled, re-install hooks.
+                # If checkpoint was saved with backbone taps (fused heatmap and/or
+                # per-level), re-record the layer indices on the head and refresh
+                # the unified hook set.  vocab_linear weights are restored via
+                # state_dict, so we only rewire the hook plumbing here.
                 bb_layers = head.anomaly_args.get("bb_layers")
-                bb_channels = head.anomaly_args.get("bb_channels")
-                if bb_layers and bb_channels:
-                    # Re-install hooks but do NOT rebuild vocab_linear: the saved
-                    # checkpoint already has the right shape (Linear weights are
-                    # part of state_dict).  Just wire up the dict reference.
-                    self.model._install_backbone_taps(list(bb_layers))
+                pl_bb_layers = head.anomaly_args.get("pl_bb_layers")
+                if bb_layers:
+                    head._bb_layer_indices = list(bb_layers)
+                if pl_bb_layers:
+                    head._pl_bb_layer_indices = list(pl_bb_layers)
+                if bb_layers or pl_bb_layers:
+                    self.model._refresh_backbone_taps()
 
             # Freeze memory bank (loaded model should not accumulate)
             self.model.freeze_memory_bank()

@@ -1572,15 +1572,14 @@ class YOLOAnomalyModel(DetectionModel):
     def _install_backbone_taps(self, layer_indices: list[int]) -> None:
         """Register forward hooks that capture backbone-layer outputs into a dict.
 
-        After install, every forward pass populates ``self._bb_feats[idx] = output``
-        for each ``idx`` in ``layer_indices``.  The AnomalyDetection head reads from
-        this dict (via ``head._bb_feats_ref``) inside ``forward_heatmap`` so the
-        fused anomaly heatmap can be computed from pre-neck backbone features
-        instead of the post-neck features the detection head normally consumes.
+        Pass the UNION of all backbone layers needed (both for fused heatmap and
+        per-level scoring).  The hooks populate ``self._bb_feats[idx] = output``
+        on every forward; consumers read via ``head._bb_feats_ref``.
 
-        Idempotent: removes any previously-installed taps first.
+        This is idempotent — removes old hooks before installing.  Callers that
+        manage subsets (e.g. heatmap layers vs per-level layers) should pass the
+        union here and update their own ``head._*_bb_layer_indices`` field.
         """
-        # Remove old hooks if any.
         for h in getattr(self, "_bb_hook_handles", []):
             h.remove()
         self._bb_hook_handles: list = []
@@ -1591,23 +1590,36 @@ class YOLOAnomalyModel(DetectionModel):
                 self._bb_feats[idx] = out
             return _hook
 
-        for idx in layer_indices:
+        for idx in sorted(set(layer_indices)):
             handle = self.model[idx].register_forward_hook(_make_hook(idx))
             self._bb_hook_handles.append(handle)
 
-        # Wire the dict reference into the AnomalyDetection head.
         head = self.model[-1]
         if isinstance(head, AnomalyDetection):
             head._bb_feats_ref = self._bb_feats
-            head._bb_layer_indices = list(layer_indices)
+
+    def _refresh_backbone_taps(self) -> None:
+        """Recompute the union of needed backbone layers from the head's current
+        ``_bb_layer_indices`` (fused heatmap) and ``_pl_bb_layer_indices`` (per-level)
+        and reinstall hooks accordingly.  Safe no-op when neither is set."""
+        head = self.model[-1]
+        needed: set[int] = set()
+        if isinstance(head, AnomalyDetection):
+            for attr in ("_bb_layer_indices", "_pl_bb_layer_indices"):
+                v = getattr(head, attr, None)
+                if v:
+                    needed.update(v)
+        if needed:
+            self._install_backbone_taps(sorted(needed))
+        else:
+            self._remove_backbone_taps()
 
     def _remove_backbone_taps(self) -> None:
         """Remove all installed forward hooks (called before pickling/deepcopy).
 
         Hook closures cannot be pickled.  The (layers, channels) config lives in
-        ``head.anomaly_args`` and is re-applied by
-        ``_restore_anomaly_metadata`` on reload, so removing the runtime hooks
-        loses nothing persistent.
+        ``head.anomaly_args`` and is re-applied by ``_restore_anomaly_metadata``
+        on reload, so removing the runtime hooks loses nothing persistent.
         """
         for h in getattr(self, "_bb_hook_handles", []):
             h.remove()
@@ -1617,7 +1629,6 @@ class YOLOAnomalyModel(DetectionModel):
         head = self.model[-1]
         if isinstance(head, AnomalyDetection):
             head._bb_feats_ref = None
-            head._bb_layer_indices = None
 
 
 # Functions ------------------------------------------------------------------------------------------------------------

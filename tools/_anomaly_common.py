@@ -28,7 +28,7 @@ from pathlib import Path
 
 import yaml
 
-from ultra_ext.yoloa import MVTEC_CATEGORIES, DAGM_CATEGORIES, get_mvtec_yolo_data
+from ultra_ext.yoloa import MVTEC_CATEGORIES, DAGM_CATEGORIES, get_mvtec_yolo_data,FABRIC_CATEGORIES, DEFAULT_VAL_KW
 
 
 # Where per-config caches live.  Each config gets a subdir under this root, and
@@ -41,15 +41,16 @@ DEFAULT_CACHE_ROOT = Path("./runs/temp/yoloa_cache")
 DATASETS: dict[str, list[str]] = {
 	"mvtec": MVTEC_CATEGORIES,
 	"dagm":  DAGM_CATEGORIES,
+	"fabric": FABRIC_CATEGORIES,
 }
 
 
 def resolve_category(cat: str) -> dict:
-	"""Resolve a category name (case-insensitive, optional ``mvtec-`` / ``dagm-`` prefix)
+	"""Resolve a category name (case-insensitive, optional ``mvtec-`` / ``dagm-`` / ``fabric-`` prefix)
 	to its on-disk paths via :func:`get_mvtec_yolo_data`."""
-	if cat.lower().startswith(("mvtec-", "dagm-")):
+	if cat.lower().startswith(("mvtec-", "dagm-", "fabric-")):
 		cat = cat.split("-", 1)[1]
-	all_cats = MVTEC_CATEGORIES + DAGM_CATEGORIES
+	all_cats = MVTEC_CATEGORIES + DAGM_CATEGORIES + FABRIC_CATEGORIES
 	canon = {c.lower(): c for c in all_cats}.get(cat.lower())
 	if canon is None:
 		raise KeyError(f"Unknown category '{cat}'. Valid: {all_cats}")
@@ -96,11 +97,8 @@ def add_category_args(p) -> None:
 # ── Config loading ─────────────────────────────────────────────────────────
 
 # Fall-back defaults for top-level sections.
-_MODEL_ARG_DEFAULTS = {
-	"imgsz": 640, "conf": 0.001, "iou": 0.001, "max_det": 1000,
-	"single_cls": True, "rect": False, "plots": False, "verbose": False,
-	"agnostic_nms": True,
-}
+_MODEL_ARG_DEFAULTS = DEFAULT_VAL_KW
+
 _ANOMALY_ARG_DEFAULTS: dict = {
 	"mode": "anomaly",
 	"feature_mode": "fused_heatmap",
@@ -119,12 +117,19 @@ _ANOMALY_ARG_DEFAULTS: dict = {
 	"max_bank_size": None,
 	"bb_heatmap_layers": None,
 	"bb_heatmap_channels": None,
+	# Per-level backbone tap — one layer index per per-level adhead (typically 3:
+	# stride-8/16/32).  Replaces cv3[i](x[i]) as the cls_feat input to adhead[i].
+	"pl_bb_heatmap_layers": None,
+	"pl_bb_heatmap_channels": None,
 }
 _BUILD_DEFAULTS = {"support_cap": 2000, "support_batch": 1}
 
 # Keys inside anomaly_arg that are NOT forwarded to model.set_anomaly_args
-# (they are handled by other model methods, e.g. enable_backbone_heatmap).
-_ANOMALY_ARG_EXCLUDE = {"bb_heatmap_layers", "bb_heatmap_channels"}
+# (they are handled by enable_backbone_heatmap / enable_backbone_per_level).
+_ANOMALY_ARG_EXCLUDE = {
+	"bb_heatmap_layers", "bb_heatmap_channels",
+	"pl_bb_heatmap_layers", "pl_bb_heatmap_channels",
+}
 
 
 def load_config(path: str | Path) -> dict:
@@ -182,6 +187,18 @@ def anomaly_arg_for_set(cfg: dict) -> dict:
 			continue
 		out[k] = v
 	return out
+
+
+def pl_bb_heatmap_for(cfg: dict):
+	"""Return ``(layers, channels)`` for per-level backbone tap, or ``None``."""
+	a = cfg["anomaly_arg"]
+	layers = a.get("pl_bb_heatmap_layers")
+	channels = a.get("pl_bb_heatmap_channels")
+	if not layers:
+		return None
+	assert channels and len(channels) == len(layers), \
+		"pl_bb_heatmap_channels must align with pl_bb_heatmap_layers"
+	return (list(layers), list(channels))
 
 
 def bb_heatmap_for(cfg: dict):

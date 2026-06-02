@@ -74,6 +74,7 @@ from ultralytics.nn.modules import (
     YOLOEDetect,
     YOLOESegment,
     YOLOESegment26,
+    BackboneMemoryBank,
     binary_seg_loss,
     v10Detect,
 )
@@ -633,6 +634,11 @@ class YOLOAnomalyV2Model(DetectionModel):
         # Allows external callers (validator) to force mask-off mode for a single forward.
         self._mask_disabled_once = False
 
+        # Memory-bank prior (training-free path). Populated via build_memory_bank().
+        self.memory_bank: BackboneMemoryBank | None = None
+        self._mb_hook_handle = None   # forward hook handle
+        self._mb_bb_feat: torch.Tensor | None = None  # captured backbone feature
+
     # ------------------------------------------------------------------
     # Mask input API
     # ------------------------------------------------------------------
@@ -669,6 +675,147 @@ class YOLOAnomalyV2Model(DetectionModel):
         self._mask_bboxes_buf = None
         self._mask_batch_idx_buf = None
         self._mask_disabled_once = False
+
+    # ------------------------------------------------------------------
+    # Memory-bank API
+    # ------------------------------------------------------------------
+
+    def install_backbone_tap(self, layer_idx: int, K: int = 5, temperature: float = 3.0,
+                             max_bank_size: int | None = 50_000,
+                             accumulate_thresh: float = 0.3) -> None:
+        """Register a forward hook on ``self.model[layer_idx]`` to capture its output.
+
+        Must be called before ``build_memory_bank()``.  Replaces any previously
+        installed hook.
+
+        Args:
+            layer_idx: Index into ``self.model`` (the backbone/neck Sequential).
+                Use the same stride-matching index as in yolo_anomaly, e.g.
+                layer 4 = stride-8 backbone output for yolo26-family.
+            K: KNN neighbours for anomaly scoring.
+            temperature: Noisy-OR β.
+            max_bank_size: Coreset compression cap (None = no compression).
+            accumulate_thresh: OBMA-style novelty threshold — features whose cosine
+                distance to the nearest bank entry is below this value are dropped
+                during accumulation.  0.0 = keep all (no filtering).
+        """
+        # Remove old hook if any.
+        if getattr(self, "_mb_hook_handle", None) is not None:
+            self._mb_hook_handle.remove()
+            self._mb_hook_handle = None
+        self._mb_bb_feat = None
+
+        def _hook(module, inp, out):
+            self._mb_bb_feat = out  # captured each forward pass
+
+        self._mb_hook_handle = self.model[layer_idx].register_forward_hook(_hook)
+        self.memory_bank = BackboneMemoryBank(
+            K=K, temperature=temperature,
+            max_bank_size=max_bank_size,
+            accumulate_thresh=accumulate_thresh,
+        )
+
+    def build_memory_bank(self, images: "list | torch.Tensor", verbose: bool = True,
+                          cache_path: "str | Path | None" = None,
+                          rebuild: bool = False) -> None:
+        """Accumulate backbone features from normal images and freeze the bank.
+
+        If ``cache_path`` is given and the file already exists (and ``rebuild`` is
+        False), the bank is loaded from disk and the forward passes are skipped.
+        After a fresh build the bank is saved to ``cache_path`` for reuse.
+
+        Args:
+            images: Pre-processed image tensor ``(B, 3, H, W)`` **or** a list of
+                such tensors/paths (each run individually through ``_predict_once``).
+            verbose: Log bank size after building.
+            cache_path: Optional path to a ``.pt`` cache file.  On hit: load and
+                return immediately.  On miss: build then save.
+            rebuild: When True, ignore any existing cache and force a fresh build.
+        """
+        if self.memory_bank is None:
+            raise RuntimeError("Call install_backbone_tap() before build_memory_bank().")
+        if getattr(self, "_mb_hook_handle", None) is None:
+            raise RuntimeError("Backbone tap not installed — call install_backbone_tap() first.")
+
+        from pathlib import Path as _Path
+        from ultralytics.utils import LOGGER
+
+        mb_cache_version = 2
+
+        # ── cache hit ──────────────────────────────────────────────────────
+        if not rebuild and cache_path is not None and _Path(cache_path).exists():
+            data = torch.load(cache_path, map_location="cpu", weights_only=True)
+            data_version = int(data.get("mb_cache_version", 0))
+            if data_version == mb_cache_version:
+                device = next(self.parameters()).device
+                self.memory_bank.bank = data["bank"].to(device)
+                self.memory_bank.feature_dim = int(data["feature_dim"])
+                if "temperature" in data:
+                    self.memory_bank.temperature = float(data["temperature"])
+                if "bank_score_mean" in data:
+                    self.memory_bank._bank_score_mean = float(data["bank_score_mean"])
+                    self.memory_bank._bank_score_std  = float(data["bank_score_std"])
+                self.memory_bank._frozen = True
+                if verbose:
+                    LOGGER.info(
+                        f"BackboneMemoryBank: loaded {self.memory_bank.bank.shape[0]} features "
+                        f"dim={self.memory_bank.feature_dim} "
+                        f"temperature={self.memory_bank.temperature:.3f} from {cache_path}"
+                    )
+                return
+            if verbose:
+                LOGGER.warning(
+                    "BackboneMemoryBank: cache version mismatch (%s != %s), rebuilding %s",
+                    data_version,
+                    mb_cache_version,
+                    cache_path,
+                )
+
+        # ── fresh build ────────────────────────────────────────────────────
+        self.memory_bank.reset()
+        chunks = images if isinstance(images, (list, tuple)) else [images]
+        try:
+            from tqdm import tqdm
+            iterator = tqdm(chunks, desc="[mb] build", unit="img", dynamic_ncols=True)
+        except ImportError:
+            iterator = chunks
+        with torch.no_grad():
+            for chunk in iterator:
+                self._predict_once(chunk.to(next(self.parameters()).device))
+                if self._mb_bb_feat is not None:
+                    self.memory_bank.accumulate(self._mb_bb_feat)
+
+        self.memory_bank.freeze()
+        if verbose:
+            LOGGER.info(
+                f"BackboneMemoryBank: {self.memory_bank.bank.shape[0]} features, "
+                f"dim={self.memory_bank.feature_dim}"
+            )
+
+        # ── save cache ─────────────────────────────────────────────────────
+        if cache_path is not None:
+            _Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "bank": self.memory_bank.bank.cpu(),
+                    "feature_dim": self.memory_bank.feature_dim,
+                    "temperature": self.memory_bank.temperature,
+                    "bank_score_mean": getattr(self.memory_bank, "_bank_score_mean", None),
+                    "bank_score_std":  getattr(self.memory_bank, "_bank_score_std",  None),
+                    "mb_cache_version": mb_cache_version,
+                },
+                cache_path,
+            )
+            if verbose:
+                LOGGER.info(f"BackboneMemoryBank: saved cache to {cache_path}")
+
+    def remove_backbone_tap(self) -> None:
+        """Remove the forward hook and discard the memory bank."""
+        if self._mb_hook_handle is not None:
+            self._mb_hook_handle.remove()
+            self._mb_hook_handle = None
+        self._mb_bb_feat = None
+        self.memory_bank = None
 
     def _consume_mask_input(self):
         # Robust to being called during super().__init__()'s stride probe,
@@ -786,6 +933,19 @@ class YOLOAnomalyV2Model(DetectionModel):
         # set_external_mask_once().
         bboxes, batch_idx, external_mask, mask_disabled = self._consume_mask_input()
 
+        # Memory-bank prior: when no GT/external mask is available and the bank is ready,
+        # use the captured backbone feature to generate a KNN heatmap as the prior.
+        # The hook (_mb_bb_feat) is populated by the backbone layer's forward hook on this
+        # same call, so we defer the heatmap computation to just before the fusion step.
+        # We just mark the intent here; the heatmap is computed after the backbone runs.
+        _use_mb_prior = (
+            external_mask is None
+            and not mask_disabled
+            and bboxes is None
+            and getattr(self, "memory_bank", None) is not None
+            and getattr(self.memory_bank, "is_ready", False)
+        )
+
         # Per-sample keep mask for mask dropout (anti-shortcut). Only meaningful when a
         # rendered/blended mask is active; keep[b]=0 zeros the per-sample bias -> passthrough.
         # getattr guards the stride probe in super().__init__(), which runs before our attrs exist.
@@ -814,6 +974,11 @@ class YOLOAnomalyV2Model(DetectionModel):
                 if seg_branch is not None:
                     seg_logits_buf = seg_branch([pan_inputs[0], pan_inputs[1]])
                     self._seg_logits_buf = seg_logits_buf
+                # Memory-bank heatmap: generated from the backbone feature captured by the
+                # forward hook.  Only active when no other mask source is available.
+                if _use_mb_prior and self._mb_bb_feat is not None:
+                    external_mask = self.memory_bank.heatmap(self._mb_bb_feat.to(device))
+                    self._mb_bb_feat = None  # consumed
                 mask = self._resolve_fusion_mask(
                     bboxes, batch_idx, external_mask, mask_disabled, seg_logits_buf, batch_size, device
                 )

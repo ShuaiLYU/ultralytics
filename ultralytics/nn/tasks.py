@@ -1214,13 +1214,26 @@ class YOLOAnomalyV2SegModel(SegmentationModel):
                     out[i, 0] = m_[0, 0]
             return out
 
-        batch_idx = batch["batch_idx"].long()
+        batch_idx = batch["batch_idx"]
+        if isinstance(batch_idx, torch.Tensor):
+            batch_idx = batch_idx.long()
         H, W = masks.shape[-2], masks.shape[-1]
-        out = torch.zeros(B, 1, H, W, device=masks.device, dtype=masks.dtype)
-        for b in range(B):
-            sel = batch_idx == b
-            if sel.any():
-                out[b, 0] = masks[sel].amax(dim=0)
+
+        # When batch_idx length matches masks.shape[0], we have per-instance masks.
+        # Otherwise treat masks as per-image (indices 0..B-1).
+        n_masks = masks.shape[0]
+        if isinstance(batch_idx, torch.Tensor) and batch_idx.numel() == n_masks:
+            out = torch.zeros(B, 1, H, W, device=masks.device, dtype=masks.dtype)
+            for b in range(B):
+                sel = batch_idx == b
+                if sel.any():
+                    out[b, 0] = masks[sel].amax(dim=0)
+        else:
+            # Per-image masks: masks[b] corresponds to image b.
+            out = torch.zeros(B, 1, H, W, device=masks.device, dtype=masks.dtype)
+            for b in range(min(B, n_masks)):
+                out[b, 0] = masks[b].squeeze(0) if masks[b].dim() == 3 else masks[b]
+
         if (H, W) != (h_out, w_out):
             out = torch.nn.functional.interpolate(out, size=(h_out, w_out), mode="nearest")
         return out

@@ -1199,15 +1199,16 @@ class YOLOAnomalyV2SegModel(SegmentationModel):
         h_out, w_out = batch["img"].shape[-2] // 8, batch["img"].shape[-1] // 8
 
         if masks is None or masks.numel() == 0:
-            return torch.zeros(B, 1, h_out, w_out, device=device)
+            return torch.zeros(B, 1, h_out, w_out, device=device, dtype=torch.float32)
 
         # Seg dataloader produces either:
         #   (a) per-instance stacked tensor + batch_idx tensor, or
         #   (b) list of per-image tensors (already unioned per image).
         if isinstance(masks, (list, tuple)):
-            out = torch.zeros(B, 1, h_out, w_out, device=device, dtype=masks[0].dtype if masks else torch.float32)
+            out = torch.zeros(B, 1, h_out, w_out, device=device, dtype=torch.float32)
             for i, m in enumerate(masks):
                 if m is not None and m.numel() > 0:
+                    m = m.float()
                     # m shape (N, Hm, Wm) — max over instances then resize to target.
                     m_ = m.amax(dim=0).unsqueeze(0).unsqueeze(0)  # (1, 1, Hm, Wm)
                     m_ = torch.nn.functional.interpolate(m_, size=(h_out, w_out), mode="nearest")
@@ -1218,19 +1219,20 @@ class YOLOAnomalyV2SegModel(SegmentationModel):
         if isinstance(batch_idx, torch.Tensor):
             batch_idx = batch_idx.long()
         H, W = masks.shape[-2], masks.shape[-1]
+        masks = masks.float()
 
         # When batch_idx length matches masks.shape[0], we have per-instance masks.
         # Otherwise treat masks as per-image (indices 0..B-1).
         n_masks = masks.shape[0]
         if isinstance(batch_idx, torch.Tensor) and batch_idx.numel() == n_masks:
-            out = torch.zeros(B, 1, H, W, device=masks.device, dtype=masks.dtype)
+            out = torch.zeros(B, 1, H, W, device=masks.device, dtype=torch.float32)
             for b in range(B):
                 sel = batch_idx == b
                 if sel.any():
                     out[b, 0] = masks[sel].amax(dim=0)
         else:
             # Per-image masks: masks[b] corresponds to image b.
-            out = torch.zeros(B, 1, H, W, device=masks.device, dtype=masks.dtype)
+            out = torch.zeros(B, 1, H, W, device=masks.device, dtype=torch.float32)
             for b in range(min(B, n_masks)):
                 out[b, 0] = masks[b].squeeze(0) if masks[b].dim() == 3 else masks[b]
 

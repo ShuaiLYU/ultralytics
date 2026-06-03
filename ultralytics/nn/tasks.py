@@ -1193,20 +1193,36 @@ class YOLOAnomalyV2SegModel(SegmentationModel):
     def _build_mask_prior(self, batch):
         """Per-image union of instance masks from the seg dataloader.  Shape (B, 1, H, W)."""
         masks = batch.get("masks", None)
-        if masks is None or masks.numel() == 0:
-            B = batch["img"].shape[0]
-            return torch.zeros(
-                B, 1, batch["img"].shape[-2] // 4, batch["img"].shape[-1] // 4,
-                device=batch["img"].device,
-            )
-        batch_idx = batch["batch_idx"].long()
         B = batch["img"].shape[0]
+        device = batch["img"].device
+        # Target spatial size — the heatmap-bias fusion expects P3 resolution (80×80 for 640 input).
+        h_out, w_out = batch["img"].shape[-2] // 8, batch["img"].shape[-1] // 8
+
+        if masks is None or masks.numel() == 0:
+            return torch.zeros(B, 1, h_out, w_out, device=device)
+
+        # Seg dataloader produces either:
+        #   (a) per-instance stacked tensor + batch_idx tensor, or
+        #   (b) list of per-image tensors (already unioned per image).
+        if isinstance(masks, (list, tuple)):
+            out = torch.zeros(B, 1, h_out, w_out, device=device, dtype=masks[0].dtype if masks else torch.float32)
+            for i, m in enumerate(masks):
+                if m is not None and m.numel() > 0:
+                    # m shape (N, Hm, Wm) — max over instances then resize to target.
+                    m_ = m.amax(dim=0).unsqueeze(0).unsqueeze(0)  # (1, 1, Hm, Wm)
+                    m_ = torch.nn.functional.interpolate(m_, size=(h_out, w_out), mode="nearest")
+                    out[i, 0] = m_[0, 0]
+            return out
+
+        batch_idx = batch["batch_idx"].long()
         H, W = masks.shape[-2], masks.shape[-1]
         out = torch.zeros(B, 1, H, W, device=masks.device, dtype=masks.dtype)
         for b in range(B):
             sel = batch_idx == b
             if sel.any():
                 out[b, 0] = masks[sel].amax(dim=0)
+        if (H, W) != (h_out, w_out):
+            out = torch.nn.functional.interpolate(out, size=(h_out, w_out), mode="nearest")
         return out
 
     # ------------------------------------------------------------------

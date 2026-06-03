@@ -142,10 +142,11 @@ def main() -> int:
         boxes = read_yolo_label(yolo_label_path(img))
         is_good = len(boxes) == 0
         mask = random_rect_mask(rng=rng) if is_good else gt_rect_mask(boxes)
-        # Warm-up so predictor exists, then inject the mask and predict.
-        model.predict(str(img), verbose=False, save=False)
-        model.predictor.model.set_external_mask_once(mask.to(next(model.predictor.model.parameters()).device))
+        # Inject mask via predictor API so resolve_v2_model unwraps AutoBackend.
+        model.predict(str(img), verbose=False, save=False)  # warm-up so predictor exists
+        model.predictor.external_mask = mask
         res = model.predict(str(img), verbose=False, save=False)[0]
+        model.predictor.external_mask = None  # reset for next iteration
         c = max_conf(res)
         (neg_conf if is_good else pos_conf).append(c)
 

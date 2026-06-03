@@ -1,7 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 # YOLO Anomaly v2.2 — SegBranch variant with Gaussian-rendered GT mask.
-# Identical to yolo26-anomaly-v2-seg.yaml except: mask_mode: gauss.
+# Identical to yolo26-anomaly-v2-segbranch.yaml except: mask_mode: gauss.
 # Tests whether the Phase 0 gauss > rect advantage carries into SegBranch.
 # Invocation example: model=yolo26m-anomaly-v2-seg-gauss.yaml
 

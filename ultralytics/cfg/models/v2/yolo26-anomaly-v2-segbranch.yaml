@@ -1,9 +1,13 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-# YOLO Anomaly v2.2 — SegBranch ablation: alpha pinned at 0.0 (pure prediction the whole run).
-# Same architecture as yolo26-anomaly-v2-segbranch.yaml; only ``seg_alpha_mode`` differs.
-# Use to measure whether the alpha curriculum is necessary: training from epoch 0 with a
-# random / freshly-initialized SegBranch heatmap as the fusion prior.
+# YOLO Anomaly v2.2 — yolo26 detection backbone + heatmap-guided fusion + SegBranch.
+# Adds a lightweight semantic-seg head (SegBranch) that predicts the anomaly heatmap
+# from the P3/P4 PAN features, supervised by the rect-rendered GT mask. An alpha
+# curriculum (handled by AnomalyV2Trainer) blends GT->prediction so inference needs
+# no external prior. Anomaly modules are attached OUTSIDE the parsed Sequential by
+# YOLOAnomalyV2Model.__init__.
+# Design doc: docs_yoloa_v2/design.md  (Phase 2 / v2.2)
+# Invocation example: model=yolo26-anomaly-v2-seg.yaml  (scale 'm')
 
 # Parameters
 nc: 80 # number of classes
@@ -18,14 +22,14 @@ scales: # model compound scaling constants
   x: [1.00, 1.50, 512]
 
 # Anomaly v2 specific config (read by YOLOAnomalyV2Model.__init__).
+# Constructor kwargs, if provided, override these values.
 anomaly_v2:
-  mask_size: 80
-  mask_mode: rect
-  sigma_factor: 0.25
-  p_drop: 0.5
-  seg_branch: true
-  seg_gain: 1.0
-  seg_alpha_mode: pinned_zero # ablation: alpha = 0.0 every epoch (prediction-only fusion)
+  mask_size: 80 # heatmap rendered/predicted at P3 spatial resolution (640/8 = 80)
+  mask_mode: rect # GT mask render mode for the fusion prior: 'rect' or 'gauss'
+  sigma_factor: 0.25 # gauss only
+  p_drop: 0.5 # per-sample mask dropout probability during training (anti-shortcut)
+  seg_branch: true # enable the SegBranch heatmap predictor (v2.2)
+  seg_gain: 1.0 # weight on the SegBranch BCE+Dice loss
 
 # Backbone (identical to yolo26.yaml)
 backbone:

@@ -1,7 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 # YOLO Anomaly v2.2 — SegBranch ablation: alpha pinned at 1.0 (pure GT mask the whole run).
-# Same architecture as yolo26-anomaly-v2-seg.yaml; only ``seg_alpha_mode`` differs.
+# Same architecture as yolo26-anomaly-v2-segbranch.yaml; only ``seg_alpha_mode`` differs.
 # Use to measure the upper bound when the fusion always sees the GT prior — SegBranch still
 # trains via its own BCE+Dice loss (detached from detection loss), so ``seg_loss`` should fall.
 

@@ -1091,6 +1091,183 @@ class SegmentationModel(DetectionModel):
         return E2ELoss(self, v8SegmentationLoss) if getattr(self, "end2end", False) else v8SegmentationLoss(self)
 
 
+class YOLOAnomalyV2SegModel(SegmentationModel):
+    """YOLO Anomaly v2 Segmentation — softhint heatmap-bias fusion on a Segment head.
+
+    Extends SegmentationModel with the same heatmap-bias fusion mechanism as
+    YOLOAnomalyV2Model (softhint branch): a bounded, low-bandwidth bias is added
+    (broadcast over channels) to each PAN P3/P4/P5 feature before the Segment head.
+
+    Mask prior:
+      - Training: union of per-instance masks from ``batch["masks"]`` (rasterized
+        from polygon labels by the Ultralytics seg dataloader), combined per-image
+        into a single ``(B, 1, H, W)`` tensor.
+      - Inference: external mask provided via ``set_external_mask_once``.
+      - Validation B-off: bias is None -> exact passthrough -> vanilla Segment.
+
+    Mask dropout (anti-shortcut): with probability ``p_drop`` per sample, the bias is
+    zeroed -> the model is forced to also perform without a mask.
+
+    Spec: docs_yoloa_v2/specs/2026-06-03-anomaly-v2-seg-design.md.
+    """
+
+    def __init__(
+        self,
+        cfg="yolo26-anomaly-v2-seg.yaml",
+        ch=3,
+        nc=None,
+        verbose=True,
+        p_drop: float | None = None,
+    ):
+        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+
+        v2_cfg = self.yaml.get("anomaly_v2", {}) if isinstance(self.yaml, dict) else {}
+        p_drop = float(v2_cfg.get("p_drop", 0.5) if p_drop is None else p_drop)
+
+        seg_head = self.model[-1]
+        if not isinstance(seg_head, Segment):
+            raise TypeError(
+                f"YOLOAnomalyV2SegModel expects last layer to be Segment, got {type(seg_head).__name__}"
+            )
+
+        pan_channels = []
+        for cv2_seq in seg_head.cv2:
+            first = cv2_seq[0]
+            if hasattr(first, "conv") and isinstance(first.conv, torch.nn.Conv2d):
+                pan_channels.append(first.conv.in_channels)
+            else:
+                raise RuntimeError(
+                    f"Unable to infer PAN channel from Segment.cv2[0]={type(first).__name__}"
+                )
+
+        self.pan_from_indices = list(seg_head.f)
+        self.pan_channels = pan_channels
+        self.heatmap_bias_fusion = HeatmapBiasFusion(num_scales=seg_head.nl)
+        self.p_drop = float(p_drop)
+
+        # Transient mask state.
+        self._mask_prior_buf = None  # (B, 1, H, W), set by loss() / set_external_mask_once
+        self._mask_disabled_once = False
+
+    # ------------------------------------------------------------------
+    # Mask input API (mirrors YOLOAnomalyV2Model)
+    # ------------------------------------------------------------------
+    def set_mask_prior(self, mask: torch.Tensor):
+        """Provide the (B, 1, H, W) mask prior for the next forward (training path)."""
+        self._mask_prior_buf = mask
+        self._mask_disabled_once = False
+
+    def disable_mask_once(self):
+        self._mask_prior_buf = None
+        self._mask_disabled_once = True
+
+    def set_external_mask_once(self, mask: torch.Tensor):
+        if mask.dim() != 4 or mask.shape[1] != 1:
+            raise ValueError(f"external mask must be (B, 1, H, W), got {tuple(mask.shape)}")
+        self._mask_prior_buf = mask
+        self._mask_disabled_once = False
+
+    def _consume_mask_input(self):
+        m = getattr(self, "_mask_prior_buf", None)
+        disabled = getattr(self, "_mask_disabled_once", False)
+        if hasattr(self, "_mask_prior_buf"):
+            self._mask_prior_buf = None
+            self._mask_disabled_once = False
+        return m, disabled
+
+    # ------------------------------------------------------------------
+    # Loss
+    # ------------------------------------------------------------------
+    def loss(self, batch, preds=None):
+        if getattr(self, "criterion", None) is None:
+            self.criterion = self.init_criterion()
+        if preds is None:
+            prior = self._build_mask_prior(batch)
+            self.set_mask_prior(prior)
+            try:
+                preds = self.forward(batch["img"])
+            finally:
+                self._mask_prior_buf = None
+        return self.criterion(preds, batch)
+
+    def _build_mask_prior(self, batch):
+        """Per-image union of instance masks from the seg dataloader.  Shape (B, 1, H, W)."""
+        masks = batch.get("masks", None)
+        if masks is None or masks.numel() == 0:
+            B = batch["img"].shape[0]
+            return torch.zeros(
+                B, 1, batch["img"].shape[-2] // 4, batch["img"].shape[-1] // 4,
+                device=batch["img"].device,
+            )
+        batch_idx = batch["batch_idx"].long()
+        B = batch["img"].shape[0]
+        H, W = masks.shape[-2], masks.shape[-1]
+        out = torch.zeros(B, 1, H, W, device=masks.device, dtype=masks.dtype)
+        for b in range(B):
+            sel = batch_idx == b
+            if sel.any():
+                out[b, 0] = masks[sel].amax(dim=0)
+        return out
+
+    # ------------------------------------------------------------------
+    # Forward with heatmap bias inserted before the Segment head
+    # ------------------------------------------------------------------
+    def _predict_once(self, x, profile=False, visualize=False, embed=None):
+        batch_size = x.shape[0]
+        device = x.device
+
+        mask, mask_disabled = self._consume_mask_input()
+
+        # Per-sample mask dropout: zero the bias for some samples at training time.
+        p_drop = getattr(self, "p_drop", 0.0)
+        keep = torch.ones(batch_size, device=device)
+        if mask is not None and self.training and p_drop > 0.0:
+            keep = (torch.rand(batch_size, device=device) > p_drop).to(keep.dtype)
+
+        if mask_disabled:
+            mask = None
+
+        y, dt, embeddings = [], [], []
+        embed = frozenset(embed) if embed is not None else {-1}
+        max_idx = max(embed)
+        last = self.model[-1]
+        for m in self.model:
+            if m is last:
+                pan_inputs = [y[j] for j in m.f]
+                fused = []
+                for i, p in enumerate(pan_inputs):
+                    if mask is None:
+                        fused.append(p)
+                        continue
+                    target_h, target_w = p.shape[2], p.shape[3]
+                    if mask.shape[-2] != target_h or mask.shape[-1] != target_w:
+                        m_scale = torch.nn.functional.interpolate(
+                            mask, size=(target_h, target_w), mode="bilinear", align_corners=False
+                        )
+                    else:
+                        m_scale = mask
+                    bias = self.heatmap_bias_fusion(m_scale, i)
+                    bias = bias * keep.to(bias.dtype).view(-1, 1, 1, 1)
+                    fused.append(p + bias)
+                x = m(fused)
+            else:
+                if m.f != -1:
+                    x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+                if profile:
+                    self._profile_one_layer(m, x, dt)
+                x = m(x)
+            y.append(x if m.i in self.save else None)
+            if visualize:
+                feature_visualization(x, m.type, m.i, save_dir=visualize)
+            if m.i in embed:
+                embeddings.append(
+                    torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1)
+                )
+                if m.i == max_idx:
+                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
+        return x
+
+
 class PoseModel(DetectionModel):
     """YOLO pose model.
 

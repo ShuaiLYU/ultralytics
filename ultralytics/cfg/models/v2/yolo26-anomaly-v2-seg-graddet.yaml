@@ -1,7 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 # YOLO Anomaly v2.2 — SegBranch variant WITHOUT detach on the predicted heatmap.
-# Identical to yolo26-anomaly-v2-seg.yaml except: seg_detach: false.
+# Identical to yolo26-anomaly-v2-segbranch.yaml except: seg_detach: false.
 #
 # Motivation: in v2.2 the predicted heatmap is detached before fusion, so det loss
 # never flows back into SegBranch. Probe (scripts/probe_segbranch_pred.py) on the

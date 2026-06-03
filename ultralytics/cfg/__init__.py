@@ -53,7 +53,7 @@ SOLUTION_MAP = {
 
 # Define valid tasks and modes
 MODES = frozenset({"train", "val", "predict", "export", "track", "benchmark"})
-TASKS = frozenset({"detect", "segment", "classify", "pose", "obb", "anomaly_v2"})
+TASKS = frozenset({"detect", "segment", "classify", "pose", "obb", "anomaly_v2", "anomaly_v2_seg"})
 TASK2DATA = {
     "detect": "coco8.yaml",
     "segment": "coco8-seg.yaml",
@@ -61,6 +61,7 @@ TASK2DATA = {
     "pose": "coco8-pose.yaml",
     "obb": "dota8.yaml",
     "anomaly_v2": "coco8.yaml",  # placeholder; user supplies their own anomaly dataset
+    "anomaly_v2_seg": "coco8-seg.yaml",  # placeholder; user supplies their own anomaly seg dataset
 }
 TASK2CALIBRATIONDATA = {
     "detect": "coco128.yaml",
@@ -69,6 +70,7 @@ TASK2CALIBRATIONDATA = {
     "pose": "coco8-pose.yaml",
     "obb": "dota128.yaml",
     "anomaly_v2": "coco128.yaml",
+    "anomaly_v2_seg": "coco128-seg.yaml",
 }
 TASK2MODEL = {
     "detect": "yolo26n.pt",
@@ -77,6 +79,7 @@ TASK2MODEL = {
     "pose": "yolo26n-pose.pt",
     "obb": "yolo26n-obb.pt",
     "anomaly_v2": "yolo26m-anomaly-v2.yaml",
+    "anomaly_v2_seg": "yolo26m-anomaly-v2-seg.yaml",
 }
 TASK2METRIC = {
     "detect": "metrics/mAP50-95(B)",
@@ -85,6 +88,7 @@ TASK2METRIC = {
     "pose": "metrics/mAP50-95(P)",
     "obb": "metrics/mAP50-95(B)",
     "anomaly_v2": "metrics/mAP50-95(B)",  # uses standard detection mAP (mask-on pass)
+    "anomaly_v2_seg": "metrics/mAP50-95(M)",  # instance segmentation mAP
 }
 
 ARGV = sys.argv or ["", ""]  # sometimes sys.argv = []

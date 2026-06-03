@@ -2,7 +2,7 @@
 
 # YOLO Anomaly v2 Segmentation — softhint heatmap-bias fusion + Segment head.
 # Reads YOLO polygon labels via the standard Ultralytics seg dataloader.
-# Branch: yoloa_v2_seg. Spec: docs_yoloa_v2/specs/2026-06-03-anomaly-v2-seg-design.md.
+# Branch: yoloa_v2_softhint_seg. Spec: docs_yoloa_v2/specs/2026-06-03-anomaly-v2-seg-design.md.
 
 nc: 80
 end2end: True

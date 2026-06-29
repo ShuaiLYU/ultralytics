@@ -896,7 +896,8 @@ class YOLOAnomalyV2Model(DetectionModel):
         self._feat_disc_scorer = None
         self._feat_disc_fuse: str = "mean"  # how the "both" heatmap producer combines bank + scorer
         self._feat_disc_weight: float = 0.5  # scorer weight when fuse="linear"
-        self._heatmap_producer: str = "bank"  # bank | learned | both (for prior_mode "heatmap")
+        self._feat_inv_decoder = None  # InvAD FeatureInversionDecoder (trained at support time)
+        self._heatmap_producer: str = "bank"  # bank | learned | both | reconstruct (for prior_mode "heatmap")
 
     # ------------------------------------------------------------------
     # Mask input API
@@ -963,6 +964,7 @@ class YOLOAnomalyV2Model(DetectionModel):
         "heatmap": ("heatmap", "bank"),
         "heatmap_learned": ("heatmap", "learned"),
         "heatmap_fused": ("heatmap", "both"),
+        "heatmap_reconstruct": ("heatmap", "reconstruct"),
     }
     # === end shim ===
 
@@ -1018,6 +1020,32 @@ class YOLOAnomalyV2Model(DetectionModel):
         self._feat_disc_weight = scorer_weight
         return scorer.fitted
 
+    def fit_invad_decoder(self, normal_feats: dict[int, torch.Tensor], **kwargs) -> bool:
+        """Fit a FeatureInversionDecoder on pre-extracted normal backbone features.
+
+        InvAD-style: a small CNN decoder learns to reconstruct frozen backbone features
+        from learnable constant queries via Spatial Style Modulation (SSM) blocks.
+        The decoder fails to reconstruct anomalous features → reconstruction error = anomaly score.
+
+        Args:
+            normal_feats: ``{layer_idx: (N, C, H, W)}`` stacked normal spatial features.
+            **kwargs: Forwarded to ``FeatureInversionDecoder`` (``decoder_ch``, ``style_ch``,
+                ``num_blocks``, ``steps``, ``lr``, ``batch``, ``seed``).
+
+        Returns:
+            True iff a usable decoder is fitted.
+        """
+        from ultralytics.nn.modules.anomaly_v2 import FeatureInversionDecoder
+
+        if not normal_feats or all(v.shape[0] < 2 for v in normal_feats.values()):
+            return False
+        encoder_chs = [v.shape[1] for v in normal_feats.values()]
+        decoder = FeatureInversionDecoder(encoder_chs, **kwargs)
+        decoder._bb_layer_indices = list(normal_feats.keys())
+        decoder.fit(normal_feats)
+        self._feat_inv_decoder = decoder if decoder.fitted else None
+        return decoder.fitted
+
     def load_support_set(
         self,
         source: str | Path | list[str],
@@ -1028,6 +1056,7 @@ class YOLOAnomalyV2Model(DetectionModel):
         max_images: int = 0,
         verbose: bool = True,
         fit_disc: bool | dict = False,
+        fit_decoder: bool | dict = False,
     ) -> int:
         """Build the BackboneMemoryBank from normal images for ``prior_mode=\"heatmap\"``.
 
@@ -1045,6 +1074,9 @@ class YOLOAnomalyV2Model(DetectionModel):
                 ``prior_mode`` ``"heatmap_learned"``/``"heatmap_fused"``). ``True`` uses defaults;
                 a dict is forwarded to :meth:`fit_feat_disc` (e.g. ``{"noise_std": 0.02,
                 "steps": 600, "fuse": "max"}``).
+            fit_decoder: Also fit a FeatureInversionDecoder on the normal spatial features (for
+                ``prior_mode`` ``"heatmap_reconstruct"``). ``True`` uses defaults; a dict is
+                forwarded to :meth:`fit_invad_decoder` (e.g. ``{"num_blocks": 4, "steps": 500}``).
 
         Returns:
             Final bank size (number of feature vectors).
@@ -1089,6 +1121,7 @@ class YOLOAnomalyV2Model(DetectionModel):
         pbar = TQDM(paths, desc="Building memory bank") if verbose else paths
         chunk = []
         n_ingested = 0  # track total images ingested for delayed temp display
+        decoder_feats: list[dict[int, torch.Tensor]] = [] if fit_decoder else None
         for p in pbar:
             img = cv2.imread(str(p))
             if img is None:
@@ -1098,10 +1131,14 @@ class YOLOAnomalyV2Model(DetectionModel):
             chunk.append(img)
             if len(chunk) >= batch:
                 self._ingest_support_batch(chunk, device, mb)
+                if decoder_feats is not None:
+                    decoder_feats.append({k: v.clone() for k, v in self._bb_feats.items()})
                 n_ingested += len(chunk)
                 chunk.clear()
         if chunk:
             self._ingest_support_batch(chunk, device, mb)
+            if decoder_feats is not None:
+                decoder_feats.append({k: v.clone() for k, v in self._bb_feats.items()})
             n_ingested += len(chunk)
 
         mb.freeze_memory_bank()
@@ -1120,6 +1157,18 @@ class YOLOAnomalyV2Model(DetectionModel):
                 LOGGER.info(
                     f"FeatureDiscriminatorScorer fit: {'ok' if ok else 'FAILED'} "
                     f"(fuse={self._feat_disc_fuse}, kwargs={kw})"
+                )
+        if fit_decoder and decoder_feats:
+            # Stack per-batch feature dicts into {layer_idx: (N, C, H, W)}
+            normal_feats: dict[int, torch.Tensor] = {}
+            for layer_idx in decoder_feats[0]:
+                normal_feats[layer_idx] = torch.cat([f[layer_idx] for f in decoder_feats], dim=0)
+            kw = dict(fit_decoder) if isinstance(fit_decoder, dict) else {}
+            ok = self.fit_invad_decoder(normal_feats, **kw)
+            if verbose:
+                LOGGER.info(
+                    f"FeatureInversionDecoder fit: {'ok' if ok else 'FAILED'} "
+                    f"(n={sum(v.shape[0] for v in normal_feats.values())}, kwargs={kw})"
                 )
         return final_size
 
@@ -1225,6 +1274,7 @@ class YOLOAnomalyV2Model(DetectionModel):
             ("_feat_disc_scorer", None),
             ("_feat_disc_fuse", "mean"),
             ("_feat_disc_weight", 0.5),
+            ("_feat_inv_decoder", None),
             ("_heatmap_producer", "bank"),
             ("spatial_softmax", False),
             ("softmax_temperature", 1.0),
@@ -1432,14 +1482,25 @@ class YOLOAnomalyV2Model(DetectionModel):
         """Feature-side heatmap prior from the configured ``_heatmap_producer``, or None.
 
         Producers:
-            bank    -> BackboneMemoryBank Noisy-OR map
-            learned -> FeatureDiscriminatorScorer (normal vs synthetic feature-noise)
-            both    -> ensemble of bank + scorer, fused per ``_feat_disc_fuse``
+            bank       -> BackboneMemoryBank Noisy-OR map
+            learned    -> FeatureDiscriminatorScorer (normal vs synthetic feature-noise)
+            both       -> ensemble of bank + scorer, fused per ``_feat_disc_fuse``
+            reconstruct -> InvAD FeatureInversionDecoder (learned feature reconstruction)
         """
         producer = getattr(self, "_heatmap_producer", "bank")
         bb_feats = getattr(self, "_bb_feats", None)
         if not bb_feats:
             return None
+
+        # -- InvAD reconstruction path (no bank needed) --
+        if producer == "reconstruct":
+            decoder = getattr(self, "_feat_inv_decoder", None)
+            if decoder is not None and decoder.fitted:
+                hmap = decoder.anomaly_map(bb_feats)
+                return self._resize_to_mask(hmap, mask_size)
+            return None
+
+        # -- Bank / scorer paths --
         mb = getattr(self, "memory_bank", None)
         disc = getattr(self, "_feat_disc_scorer", None)
         parts = []

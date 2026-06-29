@@ -83,7 +83,7 @@ def main():
     ap.add_argument("--refine-blend", type=float, default=0.,
                     help="0 = no refine (raw heatmap), 1 = fully refined (raw*sigmoid(R)), "
                          "in between = (1-b)*raw + b*refined. Requires --refiner.")
-    ap.add_argument("--hm-gate-blend", type=float, default=.0,
+    ap.add_argument("--hm-gate-blend", type=float, default=1.0,
                     help="Heatmap gating blend: 1.0=off, 0.0=full suppress at low-heatmap cells. "
                          "p_anom = p_anom * (blend + (1-blend) * hm).")
     args = ap.parse_args()

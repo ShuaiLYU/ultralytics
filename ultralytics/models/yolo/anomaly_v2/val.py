@@ -93,6 +93,8 @@ class YOLOAnomalyValidatorBase:
         self._scorer_kwargs = dict(scorer_kwargs) if scorer_kwargs else {}
         self._scorer_fuse = scorer_fuse
         self._fit_disc = False
+        # FeatureInversionDecoder (heatmap_reconstruct): fit from normal spatial features
+        self._fit_decoder = False
 
         # AUROC accumulators
         self._auroc_image_scores: list[float] = []
@@ -114,7 +116,11 @@ class YOLOAnomalyValidatorBase:
             self._saved_prior_mode = getattr(m, "_prior_mode", None)  # snapshot for restore
             effective = self.prior_mode
             needs_bank = self.prior_mode in ("heatmap", "heatmap_learned", "heatmap_fused")
-            if needs_bank and not self._ensure_memory_bank(m):
+            if self.prior_mode == "heatmap_reconstruct":
+                if not self._ensure_feat_inv_decoder(m):
+                    LOGGER.warning("YOLOAnomalyValidator: InvAD decoder unavailable -> running prior_mode='none'.")
+                    effective = "none"
+            elif needs_bank and not self._ensure_memory_bank(m):
                 # No usable bank (no bb_layers / no normal images / build failed): never run the
                 # heatmap forward against a missing-or-empty bank — fall back to bare detection so
                 # the run is honest (AUROC nan) instead of crashing or scoring against 0 vectors.
@@ -176,7 +182,7 @@ class YOLOAnomalyValidatorBase:
 
     def _single_pass(self, trainer, model):
         self._reset_auroc()
-        if self.prior_mode in ("heatmap", "heatmap_learned", "heatmap_fused"):
+        if self.prior_mode in ("heatmap", "heatmap_learned", "heatmap_fused", "heatmap_reconstruct"):
             self.args.rect = False
         return super().__call__(trainer=trainer, model=model)
 
@@ -319,9 +325,45 @@ class YOLOAnomalyValidatorBase:
         self._fit_disc = bool(ok)
         return ok
 
+    def _ensure_feat_inv_decoder(self, m) -> bool:
+        """Fit the FeatureInversionDecoder from normal spatial features.
+
+        Reuses a decoder already fitted on ``m`` (e.g. supplied by the caller); otherwise builds
+        the memory bank (for feature extraction) and fits the decoder in one call, then marks both
+        for cleanup. Returns True iff a usable decoder is ready.
+        """
+        if not hasattr(m, "fit_invad_decoder"):
+            return False
+        dec = getattr(m, "_feat_inv_decoder", None)
+        if dec is not None and getattr(dec, "fitted", False):
+            return True
+        # Check preconditions: bank config + normal images
+        mb = getattr(m, "memory_bank", None)
+        if mb is None or getattr(m, "_bb_layers", None) is None:
+            LOGGER.warning("YOLOAnomalyValidator: no BackboneMemoryBank configured; cannot extract features for decoder.")
+            return False
+        support = self._collect_support_paths()
+        if not support:
+            LOGGER.warning("YOLOAnomalyValidator: no train (normal) images found; cannot fit InvAD decoder.")
+            return False
+        imgsz = self.args.imgsz if isinstance(self.args.imgsz, int) else 640
+        try:
+            n = m.load_support_set(support, imgsz=imgsz, device=self.device,
+                                   max_bank_size=self._ood_bank_size, verbose=False,
+                                   fit_decoder=True)
+        except Exception as e:
+            LOGGER.warning(f"YOLOAnomalyValidator: InvAD decoder fit failed ({type(e).__name__}: {e}).")
+            return False
+        if not n:
+            LOGGER.warning("YOLOAnomalyValidator: memory bank empty; cannot fit InvAD decoder.")
+            return False
+        self._built_bank = True
+        self._fit_decoder = True
+        return True
+
     def _restore_prior_state(self) -> None:
-        """Undo prior_mode + any bank/scorer we built so a shared/EMA model is left clean."""
-        if self._saved_prior_mode is _SENTINEL and not self._built_bank and not self._fit_disc:
+        """Undo prior_mode + any bank/scorer/decoder we built so a shared/EMA model is left clean."""
+        if self._saved_prior_mode is _SENTINEL and not self._built_bank and not self._fit_disc and not self._fit_decoder:
             return
         m = resolve_v2_model(self._model_ref)
         if m is None:
@@ -338,6 +380,10 @@ class YOLOAnomalyValidatorBase:
             if hasattr(m, "_feat_disc_scorer"):
                 m._feat_disc_scorer = None  # drop scorer params before any checkpoint save
             self._fit_disc = False
+        if self._fit_decoder:
+            if hasattr(m, "_feat_inv_decoder"):
+                m._feat_inv_decoder = None  # drop decoder params before any checkpoint save
+            self._fit_decoder = False
 
     # ------------------------------------------------------------------
     # AUROC

@@ -30,6 +30,7 @@ __all__ = (
     "BackboneMemoryBank",
     "LearnedScorer",
     "FeatureDiscriminatorScorer",
+    "FeatureInversionDecoder",
 )
 
 
@@ -1366,6 +1367,237 @@ class _RefinerDoubleConv(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+# ---------------------------------------------------------------------------
+# InvAD-style Feature Inversion Decoder
+# ---------------------------------------------------------------------------
+
+class _SSMBlock(nn.Module):
+    """Spatial Style Modulation block — core unit of InvAD decoder.
+
+    InstanceNorm → modulate(γ, β) → Conv → GELU → Conv → residual.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.norm = nn.InstanceNorm2d(channels, affine=True)
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
+        shortcut = x
+        x = self.norm(x)
+        x = gamma * x + beta
+        x = self.act(self.conv1(x))
+        x = self.conv2(x)
+        return shortcut + x
+
+
+class FeatureInversionDecoder(nn.Module):
+    """InvAD-style feature inversion decoder for anomaly detection.
+
+    Reconstructs frozen backbone features from learnable constant queries via
+    cascaded Spatial Style Modulation (SSM) blocks. The encoder features act as
+    *style modulation signals only*, never as the decoder's input — this prevents the
+    identity shortcut that plagues conventional encoder-decoder reconstruction.
+
+    Trained with pure MSE loss on normal images (frozen backbone). At inference,
+    anomaly score = per-pixel cosine distance between original and reconstructed
+    features — the decoder cannot reconstruct what it never saw.
+
+    Deployment-friendly: all ops are standard (Conv, InstanceNorm, Upsample, Mul,
+    Add) — ONNX / TensorRT / CoreML clean. No bank storage, no nearest-neighbour
+    search. Single forward pass O(1) per query image.
+
+    Args:
+        encoder_chs: List of encoder feature channels (one per scale), e.g. ``[512]``
+            for single-scale or ``[256, 512, 1024]`` for multi-scale.
+        decoder_ch: Internal decoder channels (default 256).
+        style_ch: Style modulation bottleneck (default 64).
+        num_blocks: Number of SSM blocks per scale (default 4).
+        steps: Training steps for ``fit()`` (default 500).
+        lr: Adam learning rate for ``fit()`` (default 1e-3).
+        batch: Mini-batch size for ``fit()`` (default 8).
+        seed: Random seed for ``fit()`` sampling.
+    """
+
+    def __init__(
+        self,
+        encoder_chs: list[int],
+        decoder_ch: int = 256,
+        style_ch: int = 64,
+        num_blocks: int = 4,
+        steps: int = 500,
+        lr: float = 1e-3,
+        batch: int = 8,
+        seed: int = 0,
+    ):
+        super().__init__()
+        self.encoder_chs = list(encoder_chs)
+        self.decoder_ch = int(decoder_ch)
+        self.style_ch = int(style_ch)
+        self.num_blocks = int(num_blocks)
+        self.steps = int(steps)
+        self.lr = float(lr)
+        self.batch = int(batch)
+        self.seed = int(seed)
+        self._fitted = False
+
+        # -- Per-scale style translators (bottleneck: enc_ch → 2*style_ch → 2*decoder_ch) --
+        self.style_nets = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(ec, style_ch * 2, 3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(style_ch * 2, decoder_ch * 2, 3, padding=1),
+            ) for ec in self.encoder_chs
+        ])
+
+        # -- Per-scale SSM block stacks --
+        self.blocks = nn.ModuleList([
+            nn.ModuleList([_SSMBlock(decoder_ch) for _ in range(num_blocks)])
+            for _ in self.encoder_chs
+        ])
+
+        # -- Per-scale output projections (decoder_ch → encoder_ch) --
+        self.proj_out = nn.ModuleList([
+            nn.Conv2d(decoder_ch, ec, 1) for ec in self.encoder_chs
+        ])
+
+        # -- Learnable constant queries (one per scale, stored at canonical 40×40) --
+        self.const = nn.ParameterList([
+            nn.Parameter(torch.zeros(1, decoder_ch, 40, 40))
+            for _ in self.encoder_chs
+        ])
+        for c in self.const:
+            nn.init.trunc_normal_(c, std=0.02)
+
+        # -- Layer index mapping (set by caller) --
+        self._bb_layer_indices: list[int] = []
+
+    @property
+    def fitted(self) -> bool:
+        return self._fitted
+
+    def forward(self, feat_dict: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
+        """Reconstruct encoder features from constant queries.
+
+        Args:
+            feat_dict: ``{layer_idx: (B, C, H, W)}`` backbone features.
+
+        Returns:
+            ``{layer_idx: (B, C, H, W)}`` reconstructed features.
+        """
+        indices = self._bb_layer_indices if self._bb_layer_indices else sorted(feat_dict.keys())
+        out: dict[int, torch.Tensor] = {}
+        for i, layer_idx in enumerate(indices):
+            if layer_idx not in feat_dict or i >= len(self.const):
+                continue
+            enc_feat = feat_dict[layer_idx]  # (B, C_e, H, W)
+            b, _, h, w = enc_feat.shape
+
+            # --- style from encoder feature ---
+            style = self.style_nets[i](enc_feat)           # (B, 2*S, H, W)
+            if style.shape[2:] != (h, w):
+                style = F.interpolate(style, size=(h, w), mode="bilinear", align_corners=False)
+            gamma, beta = style.chunk(2, dim=1)             # each (B, S, H, W)
+
+            # --- decode from constant query (interpolate to match spatial size) ---
+            x = self.const[i]                               # (1, C_d, H0, W0)
+            if x.shape[2:] != (h, w):
+                x = F.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
+            x = x.expand(b, -1, -1, -1)                    # (B, C_d, H, W)
+
+            for ssm in self.blocks[i]:
+                x = ssm(x, gamma, beta)
+
+            out[layer_idx] = self.proj_out[i](x)            # (B, C_e, H, W)
+        return out
+
+    def anomaly_map(self, feat_dict: dict[int, torch.Tensor]) -> torch.Tensor:
+        """Produce a (B, 1, H, W) anomaly heatmap from reconstruction error.
+
+        Multi-scale cosine distances are averaged, then sigmoid-normalised.
+        """
+        recon = self.forward(feat_dict)
+        maps = []
+        for layer_idx, enc_feat in feat_dict.items():
+            if layer_idx not in recon:
+                continue
+            dec_feat = recon[layer_idx]
+            # Per-pixel cosine distance: 1 - cos_sim ∈ [0, 2]
+            enc_n = F.normalize(enc_feat, p=2, dim=1)
+            dec_n = F.normalize(dec_feat, p=2, dim=1)
+            cos_sim = (enc_n * dec_n).sum(dim=1, keepdim=True)  # (B, 1, H, W)
+            dist = (1.0 - cos_sim) * 0.5                         # ∈ [0, 1]
+            # Upsample to the largest spatial size in the dict
+            target_size = max(
+                (f.shape[-2:] for f in feat_dict.values()), key=lambda s: s[0]
+            )
+            if dist.shape[2:] != target_size:
+                dist = F.interpolate(dist, size=target_size, mode="bilinear", align_corners=False)
+            maps.append(dist)
+        hmap = torch.stack(maps).mean(dim=0) if maps else torch.zeros(1, 1, 80, 80)
+        return hmap.clamp(0, 1)
+
+    def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:
+        """Train the decoder on normal backbone features.
+
+        Pure MSE loss — the decoder learns to reconstruct normal feature patterns.
+        Backbone is frozen (features are pre-extracted).
+
+        Args:
+            normal_feats: ``{layer_idx: (N, C, H, W)}`` pre-extracted and stacked
+                normal features. The training loop randomly samples from ``N``.
+        """
+        indices = self._bb_layer_indices if self._bb_layer_indices else sorted(normal_feats.keys())
+        # Gather per-scale features and verify consistency
+        scale_feats: list[torch.Tensor] = []
+        for i, layer_idx in enumerate(indices):
+            if layer_idx not in normal_feats or i >= len(self.const):
+                continue
+            scale_feats.append(normal_feats[layer_idx].float())
+
+        if not scale_feats:
+            return
+
+        n = min(f.shape[0] for f in scale_feats)
+        if n < 2:
+            return
+
+        dev = scale_feats[0].device
+        g = torch.Generator(device="cpu").manual_seed(self.seed)
+
+        opt = torch.optim.Adam(self.parameters(), lr=self.lr)
+        self.train()
+        bs = min(self.batch, n)
+
+        from ultralytics.utils.tqdm import TQDM
+
+        pbar = TQDM(range(self.steps), desc=f"Training InvAD ({n} feats, {len(scale_feats)} scales)", unit="step")
+        for _ in pbar:
+            idx = torch.randint(0, n, (bs,), generator=g).to(dev)
+
+            # Build feat_dict for this minibatch
+            mb_feats: dict[int, torch.Tensor] = {}
+            for j, layer_idx in enumerate(indices):
+                if j < len(scale_feats):
+                    mb_feats[layer_idx] = scale_feats[j][idx]
+
+            recon = self.forward(mb_feats)
+            loss = torch.tensor(0.0, device=dev)
+            for layer_idx, enc in mb_feats.items():
+                if layer_idx in recon:
+                    loss = loss + F.mse_loss(recon[layer_idx], enc)
+
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
+
+        self.eval()
+        self._fitted = True
 
 
 class HeatmapRefiner(nn.Module):

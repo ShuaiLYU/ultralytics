@@ -565,7 +565,8 @@ MVTEC_CATEGORIES = [
     "metal_nut", "pill", "screw", "tile", "toothbrush", "transistor", "wood", "zipper",
 ]
 _MODE_TO_PRIOR = {"mask_off": "none", "heatmap": "heatmap", "heatmap_learned": "heatmap_learned",
-                  "heatmap_fused": "heatmap_fused", "mask_on": "box"}
+                  "heatmap_fused": "heatmap_fused", "heatmap_reconstruct": "heatmap_reconstruct",
+                  "mask_on": "box"}
 _OOD_CSV_FIELDS = ["epoch", "category", "mode", "mAP10", "mAP25", "mAP50", "mAP50_95",
                    "P", "R", "image_auroc", "pixel_auroc"]
 

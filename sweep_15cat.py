@@ -9,10 +9,10 @@ from ultralytics.models.yolo.anomaly_v2.val import run_mvtec_ood_eval, MVTEC_CAT
 CKPT = "/Users/louis/workspace/ultra_louis_work/expman/data/pulled/yoloa_clean/26m_yoloav2_softhint_maskonly_aug3_mixup_ood_aug2x_ep15_lr2x_v1/weights/best.pt"
 ROOT = Path("/Users/louis/workspace/ultra_louis_work/buffer/AnomalyData/MVTEC/MVTec-YOLO")
 CATS = MVTEC_CATEGORIES  # 15 categories
-DEVICE = "cpu"
+DEVICE = "mps"
 IMGSZ = 640
 N_TRAIN = 50
-STEPS = 500
+STEPS = 300
 DECODER_KW = {"num_blocks": 4, "decoder_ch": 128, "steps": STEPS}
 OUT = Path("runs/temp/invad_mvtec_15cat.csv")
 OUT.parent.mkdir(parents=True, exist_ok=True)

@@ -1475,7 +1475,6 @@ class FeatureInversionDecoder(nn.Module):
 
         # -- Layer index mapping (set by caller) --
         self._bb_layer_indices: list[int] = []
-        self._bias: float = 0.0      # calibration offset (computed on normal images after fit)
 
     @property
     def fitted(self) -> bool:
@@ -1519,8 +1518,7 @@ class FeatureInversionDecoder(nn.Module):
     def anomaly_map(self, feat_dict: dict[int, torch.Tensor]) -> torch.Tensor:
         """Produce a (B, 1, H, W) anomaly heatmap from reconstruction error.
 
-        Multi-scale cosine distances are averaged, then the calibration bias (mean normal
-        reconstruction error from ``fit()``) is subtracted before clamping to [0, 1].
+        Multi-scale cosine distances are averaged.
         """
         recon = self.forward(feat_dict)
         maps = []
@@ -1539,10 +1537,6 @@ class FeatureInversionDecoder(nn.Module):
                 dist = F.interpolate(dist, size=target_size, mode="bilinear", align_corners=False)
             maps.append(dist)
         hmap = torch.stack(maps).mean(dim=0) if maps else torch.zeros(1, 1, 80, 80)
-        # Calibration: subtract normal baseline, then clamp
-        bias = getattr(self, "_bias", 0.0)
-        if bias > 0:
-            hmap = (hmap - bias).clamp(0, 1)
         return hmap.clamp(0, 1)
 
     def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:
@@ -1601,19 +1595,6 @@ class FeatureInversionDecoder(nn.Module):
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         self.eval()
-        # -- Calibrate bias: mean normal reconstruction error --
-        with torch.no_grad():
-            bias_sum, bias_n = 0.0, 0
-            for idx_start in range(0, n, bs):
-                idx = torch.arange(idx_start, min(idx_start + bs, n), device=dev)
-                mb_feats = {}
-                for j, layer_idx in enumerate(indices):
-                    if j < len(scale_feats):
-                        mb_feats[layer_idx] = scale_feats[j][idx]
-                amap = self.anomaly_map(mb_feats)
-                bias_sum += amap.sum().item()
-                bias_n += amap.numel()
-            self._bias = float(bias_sum / bias_n) if bias_n > 0 else 0.0
         self._fitted = True
 
 

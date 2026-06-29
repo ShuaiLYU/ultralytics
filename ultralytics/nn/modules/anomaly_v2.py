@@ -1475,6 +1475,7 @@ class FeatureInversionDecoder(nn.Module):
 
         # -- Layer index mapping (set by caller) --
         self._bb_layer_indices: list[int] = []
+        self._gamma: float = 1.0  # power-law calibration (computed in fit())
 
     @property
     def fitted(self) -> bool:
@@ -1537,7 +1538,10 @@ class FeatureInversionDecoder(nn.Module):
                 dist = F.interpolate(dist, size=target_size, mode="bilinear", align_corners=False)
             maps.append(dist)
         hmap = torch.stack(maps).mean(dim=0) if maps else torch.zeros(1, 1, 80, 80)
-        return hmap.clamp(0, 1)
+        hmap = hmap.clamp(0, 1)
+        if getattr(self, "_gamma", 1.0) != 1.0:
+            hmap = hmap.pow(self._gamma)
+        return hmap
 
     def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:
         """Train the decoder on normal backbone features.
@@ -1595,6 +1599,33 @@ class FeatureInversionDecoder(nn.Module):
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         self.eval()
+        # -- Power-law calibration: match bank's normal baseline (~0.37) --
+        with torch.no_grad():
+            amap_sum, amap_n = 0.0, 0
+            for idx_start in range(0, n, bs):
+                idx = torch.arange(idx_start, min(idx_start + bs, n), device=dev)
+                mb_feats = {}
+                for j, layer_idx in enumerate(indices):
+                    if j < len(scale_feats):
+                        mb_feats[layer_idx] = scale_feats[j][idx]
+                recon = self.forward(mb_feats)
+                msum = 0.0
+                n_pix = 0
+                for layer_idx, enc in mb_feats.items():
+                    if layer_idx not in recon:
+                        continue
+                    en = torch.nn.functional.normalize(recon[layer_idx], p=2, dim=1)
+                    dn = torch.nn.functional.normalize(enc, p=2, dim=1)
+                    msum = msum + ((1.0 - (en * dn).sum(dim=1, keepdim=True)) * 0.5).sum()
+                    n_pix += enc.shape[2] * enc.shape[3] * enc.shape[0]
+                amap_sum += msum.item()
+                amap_n += n_pix
+            raw_mean = amap_sum / max(amap_n, 1)
+            TARGET = 0.37  # bank normal baseline
+            import math
+            gamma = math.log(TARGET) / max(math.log(max(raw_mean, 1e-6)), math.log(1e-6))
+            self._gamma = float(max(0.15, min(0.8, gamma)))
+
         self._fitted = True
 
 

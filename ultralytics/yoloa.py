@@ -158,6 +158,7 @@ class YOLOA(Model):
         device: Any = None,
         batch: int = 8,
         fit_disc: bool | dict = False,
+        fit_decoder: bool | dict = False,
         **kw: Any,
     ) -> "YOLOA":
         """Build (or load from cache) the memory bank from normal images.
@@ -174,6 +175,9 @@ class YOLOA(Model):
             fit_disc: If True or a dict, also fit a FeatureDiscriminatorScorer on the bank's
                 normal features (for prior="heatmap_learned" / "heatmap_fused"). A dict forwards
                 as kwargs (noise_std, steps, hidden, ...).
+            fit_decoder: If True or a dict, also fit a FeatureInversionDecoder on the normal
+                spatial features (for prior="heatmap_reconstruct"). A dict forwards as kwargs
+                (decoder_ch, style_ch, num_blocks, steps, ...).
             **kw: bb_* / imgsz / max_images overrides (highest priority).
 
         Returns:
@@ -208,7 +212,7 @@ class YOLOA(Model):
                 data, imgsz=int(fit_args["imgsz"]), device=device, batch=batch,
                 max_bank_size=fit_args.get("bb_max_bank_size"),
                 max_images=int(fit_args["max_images"] or 0), verbose=True,
-                fit_disc=fit_disc,
+                fit_disc=fit_disc, fit_decoder=fit_decoder,
             )
             if cache_path is not None and n:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1040,7 +1040,8 @@ class YOLOAnomalyV2Model(DetectionModel):
         if not normal_feats or all(v.shape[0] < 2 for v in normal_feats.values()):
             return False
         encoder_chs = [v.shape[1] for v in normal_feats.values()]
-        decoder = FeatureInversionDecoder(encoder_chs, **kwargs)
+        device = next(v.device for v in normal_feats.values())
+        decoder = FeatureInversionDecoder(encoder_chs, **kwargs).to(device)
         decoder._bb_layer_indices = list(normal_feats.keys())
         decoder.fit(normal_feats)
         self._feat_inv_decoder = decoder if decoder.fitted else None
@@ -1496,6 +1497,11 @@ class YOLOAnomalyV2Model(DetectionModel):
         if producer == "reconstruct":
             decoder = getattr(self, "_feat_inv_decoder", None)
             if decoder is not None and decoder.fitted:
+                # Decoder may be on a different device than the features (e.g. fit on CPU,
+                # inference on MPS). Move lazily to match.
+                feat_dev = next(iter(bb_feats.values())).device
+                if next(decoder.parameters()).device != feat_dev:
+                    decoder.to(feat_dev)
                 hmap = decoder.anomaly_map(bb_feats)
                 return self._resize_to_mask(hmap, mask_size)
             return None

@@ -207,6 +207,20 @@ class YOLOA(Model):
                 mb._compactness = d["_compactness"]
                 mb._calibrated = True
             LOGGER.info(f"YOLOA.fit: loaded cached bank ({mb.memory_bank.shape[0]} vecs) <- {cache_path}")
+            # Restore cached decoder if present
+            if fit_decoder and d.get("_decoder_state"):
+                from ultralytics.nn.modules.anomaly_v2 import FeatureInversionDecoder
+                init = d.get("_decoder_init", {})
+                dec = FeatureInversionDecoder(init.get("encoder_chs", []),
+                                              decoder_ch=init.get("decoder_ch", 256),
+                                              style_ch=init.get("style_ch", 64),
+                                              num_blocks=init.get("num_blocks", 4)).to(device)
+                dec.load_state_dict(d["_decoder_state"])
+                dec._bb_layer_indices = d.get("_decoder_indices", [])
+                dec._gamma = d.get("_decoder_gamma", 1.0)
+                dec._fitted = True
+                m._feat_inv_decoder = dec
+                LOGGER.info(f"YOLOA.fit: loaded cached decoder ({len(dec.const)} scales)")
         else:
             n = m.load_support_set(
                 data, imgsz=int(fit_args["imgsz"]), device=device, batch=batch,
@@ -222,6 +236,17 @@ class YOLOA(Model):
                     entry["_threshold"] = mb._threshold
                     entry["_compactness"] = mb._compactness
                     entry["_calibrated"] = True
+                dec = getattr(m, "_feat_inv_decoder", None)
+                if dec is not None and dec.fitted:
+                    entry["_decoder_state"] = dec.state_dict()
+                    entry["_decoder_init"] = {
+                        "encoder_chs": dec.encoder_chs,
+                        "decoder_ch": dec.decoder_ch,
+                        "style_ch": dec.style_ch,
+                        "num_blocks": dec.num_blocks,
+                    }
+                    entry["_decoder_indices"] = dec._bb_layer_indices
+                    entry["_decoder_gamma"] = dec._gamma
                 torch.save(entry, cache_path)
                 LOGGER.info(f"YOLOA.fit: cached bank ({mb.memory_bank.shape[0]} vecs) -> {cache_path}")
 

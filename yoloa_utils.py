@@ -226,17 +226,17 @@ def save_compare_grid(*, original, none_pred, seg_heat, seg_pred,
                        out_path, n_none=0, n_seg=0, n_heat=0, n_mask=0,
                        original_title="original"):
     """Build and save the 4x2 comparison grid."""
-    seg_hmap_title = "seg heatmap"
+    seg_hmap_title = "InvAD heatmap"
     if seg_heat is not None:
         seg_hmap_title += f"  [max={seg_heat.max():.3f} min={seg_heat.min():.3f}]"
-    mb_hmap_title = "mb heatmap"
+    mb_hmap_title = "bank heatmap"
     if heat_heat is not None:
         mb_hmap_title += f"  [max={heat_heat.max():.3f} min={heat_heat.min():.3f}]"
     row1 = _hstack([
         _add_title(original, original_title),
         _add_title(none_pred, f"None Prior ({n_none} det)"),
         _add_title(_heatmap_panel(original, seg_heat), seg_hmap_title),
-        _add_title(seg_pred, f"segment prior ({n_seg} det)"),
+        _add_title(seg_pred, f"InvAD prior ({n_seg} det)"),
     ])
     row2 = _hstack([
         _add_title(_heatmap_panel(original, heat_heat), mb_hmap_title),

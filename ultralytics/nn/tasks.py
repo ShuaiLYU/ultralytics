@@ -1041,9 +1041,10 @@ class YOLOAnomalyV2Model(DetectionModel):
             return False
         encoder_chs = [v.shape[1] for v in normal_feats.values()]
         device = next(v.device for v in normal_feats.values())
-        decoder = FeatureInversionDecoder(encoder_chs, **kwargs).to(device)
-        decoder._bb_layer_indices = list(normal_feats.keys())
-        decoder.fit(normal_feats)
+        with torch.inference_mode(False):
+            decoder = FeatureInversionDecoder(encoder_chs, **kwargs).to(device)
+            decoder._bb_layer_indices = list(normal_feats.keys())
+            decoder.fit(normal_feats)
         self._feat_inv_decoder = decoder if decoder.fitted else None
         return decoder.fitted
 

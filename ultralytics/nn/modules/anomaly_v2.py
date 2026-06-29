@@ -1554,49 +1554,51 @@ class FeatureInversionDecoder(nn.Module):
                 normal features. The training loop randomly samples from ``N``.
         """
         indices = self._bb_layer_indices if self._bb_layer_indices else sorted(normal_feats.keys())
-        # Gather per-scale features and verify consistency
-        scale_feats: list[torch.Tensor] = []
-        for i, layer_idx in enumerate(indices):
-            if layer_idx not in normal_feats or i >= len(self.const):
-                continue
-            scale_feats.append(normal_feats[layer_idx].float())
+        with torch.inference_mode(False):
+            # Gather per-scale features and verify consistency (clone outside inference_mode
+            # so the resulting tensors are usable in autograd on MPS)
+            scale_feats: list[torch.Tensor] = []
+            for i, layer_idx in enumerate(indices):
+                if layer_idx not in normal_feats or i >= len(self.const):
+                    continue
+                scale_feats.append(normal_feats[layer_idx].float().clone())
 
-        if not scale_feats:
-            return
+            if not scale_feats:
+                return
 
-        n = min(f.shape[0] for f in scale_feats)
-        if n < 2:
-            return
+            n = min(f.shape[0] for f in scale_feats)
+            if n < 2:
+                return
 
-        dev = scale_feats[0].device
-        g = torch.Generator(device="cpu").manual_seed(self.seed)
+            dev = scale_feats[0].device
+            g = torch.Generator(device="cpu").manual_seed(self.seed)
 
-        opt = torch.optim.Adam(self.parameters(), lr=self.lr)
-        self.train()
-        bs = min(self.batch, n)
+            opt = torch.optim.Adam(self.parameters(), lr=self.lr)
+            self.train()
+            bs = min(self.batch, n)
 
-        from ultralytics.utils.tqdm import TQDM
+            from ultralytics.utils.tqdm import TQDM
 
-        pbar = TQDM(range(self.steps), desc=f"Training InvAD ({n} feats, {len(scale_feats)} scales)", unit="step")
-        for _ in pbar:
-            idx = torch.randint(0, n, (bs,), generator=g).to(dev)
+            pbar = TQDM(range(self.steps), desc=f"Training InvAD ({n} feats, {len(scale_feats)} scales)", unit="step")
+            for _ in pbar:
+                idx = torch.randint(0, n, (bs,), generator=g).to(dev)
 
-            # Build feat_dict for this minibatch
-            mb_feats: dict[int, torch.Tensor] = {}
-            for j, layer_idx in enumerate(indices):
-                if j < len(scale_feats):
-                    mb_feats[layer_idx] = scale_feats[j][idx]
+                # Build feat_dict for this minibatch
+                mb_feats: dict[int, torch.Tensor] = {}
+                for j, layer_idx in enumerate(indices):
+                    if j < len(scale_feats):
+                        mb_feats[layer_idx] = scale_feats[j][idx]
 
-            recon = self.forward(mb_feats)
-            loss = torch.tensor(0.0, device=dev)
-            for layer_idx, enc in mb_feats.items():
-                if layer_idx in recon:
-                    loss = loss + F.mse_loss(recon[layer_idx], enc)
+                recon = self.forward(mb_feats)
+                loss = torch.tensor(0.0, device=dev)
+                for layer_idx, enc in mb_feats.items():
+                    if layer_idx in recon:
+                        loss = loss + F.mse_loss(recon[layer_idx], enc)
 
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         self.eval()
         # -- Power-law calibration: match bank's normal baseline (~0.37) --

@@ -38,7 +38,7 @@ from ultralytics.utils import LOGGER, YAML
 # existing external-mask seam (prior_mode="mask"). "segment"/"cached" remain usable as advanced
 # pass-through values. (Legacy "heatmap_learned"/"heatmap_fused"/"cached" are translated to the
 # "heatmap" source + a heatmap producer by AnomalyDetection.set_prior_mode.)
-PRIOR_MODES = ("none", "heatmap", "heatmap_learned", "heatmap_fused", "mask", "anomaly_model")
+PRIOR_MODES = ("none", "heatmap", "heatmap_learned", "heatmap_fused", "heatmap_reconstruct", "mask", "anomaly_model")
 _ADVANCED_PRIORS = ("segment", "cached")
 
 # Bank-build knobs that live in the fit config. bb_* override the model yaml's v2_cfg defaults;

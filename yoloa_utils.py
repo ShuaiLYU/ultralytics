@@ -21,7 +21,8 @@ CAT_GROUPS = {"object": MVTEC_OBJECT, "texture": MVTEC_TEXTURE, "random5": MVTEC
 VAL_METRICS = ("image_auroc", "pixel_auroc", "mAP10", "mAP25", "mAP50", "mAP50_95")
 
 # YAML heatmap_mode -> prior_mode
-MODE_MAP = {"memory_bank": "heatmap", "learned": "heatmap_learned", "fused": "heatmap_fused"}
+MODE_MAP = {"memory_bank": "heatmap", "learned": "heatmap_learned", "fused": "heatmap_fused",
+           "reconstruct": "heatmap_reconstruct"}
 
 # YAML keys -> FeatureDiscriminatorScorer kwargs
 SCORER_YAML_KEYS = {

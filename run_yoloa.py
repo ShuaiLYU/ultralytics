@@ -98,6 +98,8 @@ def main():
     needs_disc = False
     scorer_kwargs = {}
     scorer_fuse = "mean"
+    needs_decoder = False
+    decoder_kwargs = {}
 
     for p in prior_list:
         if p == "none":
@@ -110,10 +112,18 @@ def main():
                 scorer_fuse = yaml.get("scorer_fuse", "mean")
                 scorer_weight = yaml.get("scorer_weight", 0.5)
                 scorer_kwargs["scorer_weight"] = scorer_weight
+            elif mode == "heatmap_reconstruct":
+                needs_decoder = True
+                decoder_kwargs = {k: yaml[k] for k in ("decoder_ch", "num_blocks", "steps", "style_ch")
+                                  if k in yaml}
         elif p == "mask":
             mode = "mask_on"
         else:
-            mode = p  # "segment", etc.
+            mode = p  # "segment", "heatmap_reconstruct", etc.
+            if mode == "heatmap_reconstruct":
+                needs_decoder = True
+                decoder_kwargs = {k: yaml[k] for k in ("decoder_ch", "num_blocks", "steps", "style_ch")
+                                  if k in yaml}
         if mode not in val_modes:
             val_modes.append(mode)
             mode_to_prior[mode] = p
@@ -171,6 +181,7 @@ def main():
     bank_cache = args.bank_cache or str(out_root / "banks")
 
     fit_disc = scorer_kwargs if needs_disc else False
+    fit_decoder = decoder_kwargs if decoder_kwargs else (True if needs_decoder else False)
 
     print(f"YOLOA {args.mode} | root: {root} | device: {device} | imgsz: {imgsz} | "
           f"priors: {prior_mode_display} | heat_edge: {infer.get('heat_edge', False)} "
@@ -179,6 +190,8 @@ def main():
     print(f"  out: {out_root}  |  bank-cache: {bank_cache}", flush=True)
     if needs_disc:
         print(f"  scorer: {scorer_kwargs}  fuse={scorer_fuse}", flush=True)
+    if needs_decoder:
+        print(f"  decoder: {decoder_kwargs or 'default'}", flush=True)
 
     rows = []
     for ci, cat in enumerate(cats, 1):
@@ -187,7 +200,7 @@ def main():
             LOGGER.warning(f"[{ci}/{len(cats)}] {cat}: no train dir at {gd}; skipping")
             continue
         m.fit(str(gd), name=cat, cfg=fit_cfg_path, batch=args.batch, device=device,
-              cache=bank_cache, fit_disc=fit_disc, **fit_over)
+              cache=bank_cache, fit_disc=fit_disc, fit_decoder=fit_decoder, **fit_over)
 
         if args.mode == "predict":
             out = out_root / "predict" / cat

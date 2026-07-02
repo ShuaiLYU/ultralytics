@@ -19,7 +19,7 @@ Usage on ultra6 (6 GPUs × 3 workers = 18 slots):
 import sys; sys.path.insert(0, ".")
 import logging; logging.getLogger("ultralytics").setLevel(logging.WARNING)
 from pathlib import Path
-import argparse, csv, json, math, random, time, numpy as np, traceback, os
+import argparse, csv, json, math, random, time, numpy as np, traceback, os, torch
 from ultralytics.yoloa import YOLOA
 from ultralytics.models.yolo.anomaly_v2.val import run_mvtec_ood_eval
 

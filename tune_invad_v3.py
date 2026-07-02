@@ -5,10 +5,16 @@ Key changes from v2:
   - batch=32 (was 8)
   - New archs: UNetFeatureDecoder, DiffusionFeatureDecoder
   - SSM now has residual_mode + norm_type
+  - Multi-worker per GPU: --workers-per-gpu N --worker 0..N-1
 
-Usage on ultra6 (4 GPUs):
-  CUDA_VISIBLE_DEVICES=4 nohup /home/louis/miniconda3/envs/ultra/bin/python tune_invad_v3.py --gpu 0 --total-gpus 4 > runs/temp/invad_v3_gpu0.log 2>&1 &
-  ... (same for gpu 1,2,3 with CUDA_VISIBLE_DEVICES=5,6,7)
+Usage on ultra6 (6 GPUs × 3 workers = 18 slots):
+  for gpu in {2..7}; do
+    for w in {0..2}; do
+      CUDA_VISIBLE_DEVICES=$gpu nohup /home/louis/miniconda3/envs/ultra/bin/python \
+        tune_invad_v3.py --gpu $((gpu-2)) --total-gpus 6 --workers-per-gpu 3 --worker $w \
+        > runs/temp/invad_v3_gpu$((gpu-2))_w$w.log 2>&1 &
+    done
+  done
 """
 import sys; sys.path.insert(0, ".")
 import logging; logging.getLogger("ultralytics").setLevel(logging.WARNING)
@@ -19,12 +25,21 @@ from ultralytics.models.yolo.anomaly_v2.val import run_mvtec_ood_eval
 
 # -- CLI ------------------------------------------------------------------
 ap = argparse.ArgumentParser()
-ap.add_argument("--gpu", type=int, default=0)
-ap.add_argument("--total-gpus", type=int, default=4)
+ap.add_argument("--gpu", type=int, default=0, help="Physical GPU index (within --total-gpus)")
+ap.add_argument("--total-gpus", type=int, default=4, help="Number of physical GPUs in pool")
+ap.add_argument("--workers-per-gpu", type=int, default=1, help="Workers per physical GPU")
+ap.add_argument("--worker", type=int, default=0, help="Worker index within this physical GPU (0..workers_per_gpu-1)")
 args = ap.parse_args()
 
-GPU_RANK = args.gpu
-GPU_COUNT = args.total_gpus
+GPU_INDEX = args.gpu          # physical GPU index
+GPU_COUNT = args.total_gpus   # physical GPU count
+WP_GPU   = args.workers_per_gpu
+W_INDEX  = args.worker
+
+# Effective rank for config partitioning across all worker slots
+EFFECTIVE_RANK  = GPU_INDEX * WP_GPU + W_INDEX
+EFFECTIVE_TOTAL = GPU_COUNT * WP_GPU
+
 DEVICE = "cuda:0"
 
 # -- Paths & constants -----------------------------------------------------
@@ -123,19 +138,21 @@ def make_configs():
 
 
 CONFIGS = make_configs()
-my_configs = [(name, kw) for i, (name, kw) in enumerate(CONFIGS) if i % GPU_COUNT == GPU_RANK]
+my_configs = [(name, kw) for i, (name, kw) in enumerate(CONFIGS) if i % EFFECTIVE_TOTAL == EFFECTIVE_RANK]
 
-print(f"[gpu{GPU_RANK}/{GPU_COUNT}] total: {len(CONFIGS)} configs, my share: {len(my_configs)}", flush=True)
+print(f"[gpu{GPU_INDEX}/{GPU_COUNT} w{W_INDEX}/{WP_GPU-1}] "
+      f"effective rank {EFFECTIVE_RANK}/{EFFECTIVE_TOTAL} "
+      f"| {len(my_configs)} configs × {len(CATS)} cats", flush=True)
 
 # -- Output paths ----------------------------------------------------------
-SUFFIX = f"_gpu{GPU_RANK}"
+SUFFIX = f"_gpu{GPU_INDEX}_w{W_INDEX}"
 OUT_CSV = Path(f"runs/temp/invad_v3_tune{SUFFIX}.csv")
 OUT_PROG = Path(f"runs/temp/invad_v3_progress{SUFFIX}.json")
 LOG = Path(f"runs/temp/invad_v3_tune{SUFFIX}.log")
 OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
 
 def log(msg):
-    line = f"[{time.strftime('%H:%M:%S')}] gpu{GPU_RANK} {msg}"
+    line = f"[{time.strftime('%H:%M:%S')}] g{GPU_INDEX}w{W_INDEX} {msg}"
     print(line, flush=True)
     with open(LOG, "a") as f:
         f.write(line + "\n")
@@ -237,7 +254,7 @@ for cfg_name, kw in my_configs:
         with open(OUT_CSV, "a", newline="") as f:
             csv.DictWriter(f, fieldnames=fieldnames).writerow(row)
         done.add(key)
-        OUT_PROG.write_text(json.dumps({"done": list(done), "gpu": GPU_RANK}))
+        OUT_PROG.write_text(json.dumps({"done": list(done), "gpu": GPU_INDEX, "worker": W_INDEX}))
 
     if cat_results:
         avgs = {k: round(float(np.mean([r[k] for r in cat_results.values()])), 4)

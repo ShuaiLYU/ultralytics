@@ -11,17 +11,23 @@ from ultralytics.yoloa import YOLOA
 from ultralytics.models.yolo.anomaly_v2.val import run_mvtec_ood_eval
 
 CKPT = "/home/louis/ultra_louis_work/expman/data/pulled/yoloa_clean/26m_yoloav2_softhint_maskonly_aug3_mixup_ood_aug2x_ep15_lr2x_v1/weights/best.pt"
-ROOT = Path("/data/shared-datasets/louis_data/MVTec-YOLO")
+from ultralytics.models.yolo.anomaly_v2.val import resolve_mvtec_root, good_dir as _good_dir
+
 DEVICE = "cuda:0"
 IMGSZ = 640
 CATS = ["bottle", "cable", "screw", "zipper", "toothbrush"]
 
+ROOT = resolve_mvtec_root(None)
 print(f"ultra6 bank baseline | device={DEVICE} | cats={CATS}", flush=True)
 print(f"ckpt: {CKPT}", flush=True)
+print(f"mvtec_root: {ROOT}", flush=True)
 
 results = {}
 for cat in CATS:
-    gd = str(ROOT / cat / "train/good")
+    gd = _good_dir(ROOT, cat) if ROOT else None
+    if not gd or not gd.is_dir():
+        print(f"  {cat:15s} SKIP — no train/good dir", flush=True)
+        continue
     t0 = time.time()
     m = YOLOA(CKPT)
     # Bank-only: full training set, edge_weight on (matches fit YAML)

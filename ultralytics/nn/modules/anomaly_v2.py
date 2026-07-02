@@ -2103,7 +2103,9 @@ class DiffusionFeatureDecoder(nn.Module):
                 continue
             enc_feat = feat_dict[layer_idx]
             b, _, h, w = enc_feat.shape
-            cond = self.style_nets[i](enc_feat)
+            # Normalise encoder features (matching fit() which L2-normalises before style net)
+            enc_norm = F.normalize(enc_feat, p=2, dim=1)
+            cond = self.style_nets[i](enc_norm)
             if cond.shape[2:] != (h, w):
                 cond = F.interpolate(cond, size=(h, w), mode="bilinear", align_corners=False)
 
@@ -2153,7 +2155,10 @@ class DiffusionFeatureDecoder(nn.Module):
             for i, layer_idx in enumerate(indices):
                 if layer_idx not in normal_feats or i >= len(self.style_nets):
                     continue
-                scale_feats.append(normal_feats[layer_idx].float().clone())
+                # L2-normalise per spatial position so the data distribution is ~unit-variance
+                # (DDPM assumes unit-variance data; raw backbone features have arbitrary scale)
+                feats = normal_feats[layer_idx].float().clone()
+                scale_feats.append(F.normalize(feats, p=2, dim=1))
             if not scale_feats:
                 return
             n = min(f.shape[0] for f in scale_feats)
@@ -2174,14 +2179,14 @@ class DiffusionFeatureDecoder(nn.Module):
                 for j, layer_idx in enumerate(indices):
                     if j >= len(scale_feats):
                         continue
-                    enc = scale_feats[j][idx]  # (bs, C, H, W)
+                    enc = scale_feats[j][idx]  # (bs, C, H, W), L2-normalised
                     # Sample timesteps
                     t = torch.randint(0, self.num_diff_steps, (bs,), device=dev)
-                    # Add noise
+                    # Add noise to unit-norm features
                     alpha_bar_t = self.alpha_bar[t].view(-1, 1, 1, 1)
                     eps = torch.randn_like(enc)
                     xt = alpha_bar_t.sqrt() * enc + (1 - alpha_bar_t).sqrt() * eps
-                    # Get conditioning
+                    # Conditioning from normalised features
                     cond = self.style_nets[j](enc)
                     # Predict noise
                     eps_pred = self.unet(xt, t, cond)

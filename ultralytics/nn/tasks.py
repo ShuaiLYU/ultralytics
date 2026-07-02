@@ -1021,28 +1021,47 @@ class YOLOAnomalyV2Model(DetectionModel):
         return scorer.fitted
 
     def fit_invad_decoder(self, normal_feats: dict[int, torch.Tensor], **kwargs) -> bool:
-        """Fit a FeatureInversionDecoder on pre-extracted normal backbone features.
+        """Fit an InvAD-style feature decoder on pre-extracted normal backbone features.
 
-        InvAD-style: a small CNN decoder learns to reconstruct frozen backbone features
-        from learnable constant queries via Spatial Style Modulation (SSM) blocks.
-        The decoder fails to reconstruct anomalous features → reconstruction error = anomaly score.
+        Supports three architectures (select via ``arch`` kwarg):
+        - ``"ssm"`` (default): Spatial Style Modulation blocks (FeatureInversionDecoder)
+        - ``"unet"``: Tiny U-Net with FiLM conditioning (UNetFeatureDecoder)
+        - ``"diffusion"``: DDPM-style denoising (DiffusionFeatureDecoder)
+
+        The decoder reconstructs frozen backbone features; reconstruction error = anomaly score.
 
         Args:
             normal_feats: ``{layer_idx: (N, C, H, W)}`` stacked normal spatial features.
-            **kwargs: Forwarded to ``FeatureInversionDecoder`` (``decoder_ch``, ``style_ch``,
-                ``num_blocks``, ``steps``, ``lr``, ``batch``, ``seed``).
+            **kwargs: Forwarded to the decoder class. Key args vary by arch:
+                SSM: ``decoder_ch``, ``style_ch``, ``num_blocks``, ``residual_mode``, ``norm_type``
+                UNet: ``base_ch``, ``num_levels``, ``norm_type``
+                Diffusion: ``unet_ch``, ``num_diff_steps``, ``num_infer_steps``
+                All: ``steps``, ``lr``, ``batch``, ``seed``, ``loss_mode``
 
         Returns:
             True iff a usable decoder is fitted.
         """
-        from ultralytics.nn.modules.anomaly_v2 import FeatureInversionDecoder
+        from ultralytics.nn.modules.anomaly_v2 import (
+            DiffusionFeatureDecoder,
+            FeatureInversionDecoder,
+            UNetFeatureDecoder,
+        )
 
         if not normal_feats or all(v.shape[0] < 2 for v in normal_feats.values()):
             return False
         encoder_chs = [v.shape[1] for v in normal_feats.values()]
         device = next(v.device for v in normal_feats.values())
+
+        arch = kwargs.pop("arch", "ssm")
+        if arch == "diffusion":
+            cls = DiffusionFeatureDecoder
+        elif arch == "unet":
+            cls = UNetFeatureDecoder
+        else:
+            cls = FeatureInversionDecoder
+
         with torch.inference_mode(False):
-            decoder = FeatureInversionDecoder(encoder_chs, **kwargs).to(device)
+            decoder = cls(encoder_chs, **kwargs).to(device)
             decoder._bb_layer_indices = list(normal_feats.keys())
             decoder.fit(normal_feats)
         self._feat_inv_decoder = decoder if decoder.fitted else None

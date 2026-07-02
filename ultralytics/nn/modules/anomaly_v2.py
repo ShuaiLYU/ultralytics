@@ -12,6 +12,8 @@ See docs_yoloa_v2/specs/2026-06-02-softhint-fusion-design.md.
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1376,15 +1378,24 @@ class _RefinerDoubleConv(nn.Module):
 class _SSMBlock(nn.Module):
     """Spatial Style Modulation block — core unit of InvAD decoder.
 
-    InstanceNorm → modulate(γ, β) → Conv → GELU → Conv → residual.
+    Norm → modulate(γ, β) → Conv → GELU → Conv → optional residual.
     """
 
-    def __init__(self, channels: int):
+    def __init__(self, channels: int, norm_type: str = "instance", use_residual: bool = True):
         super().__init__()
-        self.norm = nn.InstanceNorm2d(channels, affine=True)
+        if norm_type == "group":
+            num_groups = min(32, channels)
+            if channels % num_groups != 0:
+                num_groups = 16 if channels % 16 == 0 else 8
+            self.norm = nn.GroupNorm(num_groups, channels, affine=True)
+        elif norm_type == "batch":
+            self.norm = nn.BatchNorm2d(channels, affine=True)
+        else:
+            self.norm = nn.InstanceNorm2d(channels, affine=True)
         self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
         self.act = nn.GELU()
+        self.use_residual = use_residual
 
     def forward(self, x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
         shortcut = x
@@ -1392,7 +1403,7 @@ class _SSMBlock(nn.Module):
         x = gamma * x + beta
         x = self.act(self.conv1(x))
         x = self.conv2(x)
-        return shortcut + x
+        return shortcut + x if self.use_residual else x
 
 
 class FeatureInversionDecoder(nn.Module):
@@ -1434,6 +1445,8 @@ class FeatureInversionDecoder(nn.Module):
         batch: int = 8,
         seed: int = 0,
         loss_mode: str = "mse",
+        residual_mode: str = "block",
+        norm_type: str = "instance",
     ):
         super().__init__()
         self.encoder_chs = list(encoder_chs)
@@ -1445,6 +1458,8 @@ class FeatureInversionDecoder(nn.Module):
         self.batch = int(batch)
         self.seed = int(seed)
         self.loss_mode = str(loss_mode)
+        self.residual_mode = str(residual_mode)
+        self.norm_type = str(norm_type)
         self._fitted = False
 
         # -- Per-scale style translators (bottleneck: enc_ch → 2*style_ch → 2*decoder_ch) --
@@ -1457,10 +1472,20 @@ class FeatureInversionDecoder(nn.Module):
         ])
 
         # -- Per-scale SSM block stacks --
+        use_block_res = (residual_mode in ("block", "inter_block"))
         self.blocks = nn.ModuleList([
-            nn.ModuleList([_SSMBlock(decoder_ch) for _ in range(num_blocks)])
+            nn.ModuleList([_SSMBlock(decoder_ch, norm_type=norm_type, use_residual=use_block_res)
+                          for _ in range(num_blocks)])
             for _ in self.encoder_chs
         ])
+
+        # -- Dense projection (1×1 to reduce concat back to decoder_ch) --
+        self._dense_proj: nn.ModuleList | None = None
+        if residual_mode == "dense" and num_blocks > 1:
+            self._dense_proj = nn.ModuleList([
+                nn.Conv2d(decoder_ch * num_blocks, decoder_ch, 1)
+                for _ in self.encoder_chs
+            ])
 
         # -- Per-scale output projections (decoder_ch → encoder_ch) --
         self.proj_out = nn.ModuleList([
@@ -1512,8 +1537,20 @@ class FeatureInversionDecoder(nn.Module):
                 x = F.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
             x = x.expand(b, -1, -1, -1)                    # (B, C_d, H, W)
 
-            for ssm in self.blocks[i]:
-                x = ssm(x, gamma, beta)
+            if self.residual_mode == "dense" and self.num_blocks > 1:
+                block_outs = []
+                for ssm in self.blocks[i]:
+                    block_outs.append(ssm(x, gamma, beta))
+                    x = self._dense_proj[i](torch.cat(block_outs, dim=1))
+            elif self.residual_mode == "inter_block" and self.num_blocks > 1:
+                for blk_idx, ssm in enumerate(self.blocks[i]):
+                    if blk_idx == 0:
+                        x = ssm(x, gamma, beta)
+                    else:
+                        x = ssm(x, gamma, beta) + x
+            else:
+                for ssm in self.blocks[i]:
+                    x = ssm(x, gamma, beta)
 
             out[layer_idx] = self.proj_out[i](x)            # (B, C_e, H, W)
         return out
@@ -1640,6 +1677,519 @@ class FeatureInversionDecoder(nn.Module):
                 amap_n += n_pix
             raw_mean = amap_sum / max(amap_n, 1)
             TARGET = 0.37  # bank normal baseline
+            import math
+            gamma = math.log(TARGET) / max(math.log(max(raw_mean, 1e-6)), math.log(1e-6))
+            self._gamma = float(max(0.15, min(0.8, gamma)))
+
+        self._fitted = True
+
+
+# ---------------------------------------------------------------------------
+# UNet-style Feature Decoder
+# ---------------------------------------------------------------------------
+
+class _FiLMBlock(nn.Module):
+    """Conv → Norm → FiLM → GELU × 2 with FiLM applied after first norm."""
+
+    def __init__(self, in_ch: int, out_ch: int, cond_ch: int, norm_type: str = "group"):
+        super().__init__()
+        if norm_type == "group":
+            ng = min(32, out_ch)
+            if out_ch % ng != 0:
+                ng = 16 if out_ch % 16 == 0 else 8
+            self.norm = nn.GroupNorm(ng, out_ch) if in_ch == out_ch else nn.GroupNorm(ng, out_ch)
+        elif norm_type == "batch":
+            self.norm = nn.BatchNorm2d(out_ch) if in_ch == out_ch else nn.BatchNorm2d(out_ch)
+        else:
+            self.norm = nn.InstanceNorm2d(out_ch, affine=True) if in_ch == out_ch else nn.Identity()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.film = nn.Conv2d(cond_ch, out_ch * 2, 1)
+        self.act = nn.GELU()
+        self._proj = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        x = self.act(self.conv1(x))
+        x = self._proj(x) if isinstance(self._proj, nn.Conv2d) else x
+        x_norm = self.norm(x) if not isinstance(self.norm, nn.Identity) else x
+        gamma, beta = self.film(cond).chunk(2, dim=1)
+        x = gamma * x_norm + beta
+        return self.act(self.conv2(x))
+
+
+class UNetFeatureDecoder(nn.Module):
+    """Tiny U-Net decoder with FiLM conditioning from encoder features.
+
+    Downsampling path with FiLM at every block → bottleneck → upsampling with skip
+    connections. Learned constant query as input; encoder features provide style
+    conditioning only.
+    """
+
+    def __init__(
+        self,
+        encoder_chs: list[int],
+        base_ch: int = 64,
+        num_levels: int = 2,
+        steps: int = 500,
+        lr: float = 1e-3,
+        batch: int = 16,
+        seed: int = 0,
+        loss_mode: str = "mse+cosine",
+        norm_type: str = "group",
+    ):
+        super().__init__()
+        self.encoder_chs = list(encoder_chs)
+        self.base_ch = int(base_ch)
+        self.num_levels = int(num_levels)
+        self.steps = int(steps)
+        self.lr = float(lr)
+        self.batch = int(batch)
+        self.seed = int(seed)
+        self.loss_mode = str(loss_mode)
+        self._fitted = False
+
+        enc_ch = encoder_chs[0]
+
+        # Style nets: one per scale → conditioning channels = base_ch
+        self.style_nets = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(ec, base_ch, 3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(base_ch, base_ch, 3, padding=1),
+            ) for ec in self.encoder_chs
+        ])
+
+        # Encoder path
+        chs = [base_ch * (2 ** i) for i in range(num_levels + 1)]
+        self.enc_blocks = nn.ModuleList([
+            _FiLMBlock(base_ch if i == 0 else chs[i - 1], chs[i], base_ch, norm_type=norm_type)
+            for i in range(len(chs))
+        ])
+        self.down = nn.ModuleList([nn.MaxPool2d(2) for _ in range(num_levels)])
+
+        # Bottleneck
+        self.bottleneck = _FiLMBlock(chs[-1], chs[-1], base_ch, norm_type=norm_type)
+
+        # Decoder path
+        self.up_convs = nn.ModuleList([
+            nn.ConvTranspose2d(chs[-1 - i], chs[-2 - i], 2, stride=2) for i in range(num_levels)
+        ])
+        self.dec_blocks = nn.ModuleList([
+            _FiLMBlock(chs[-2 - i] * 2, chs[-2 - i], base_ch, norm_type=norm_type)
+            for i in range(num_levels)
+        ])
+
+        # Output projection
+        self.proj_out = nn.Conv2d(base_ch, enc_ch, 1)
+
+        # Const query
+        self.const = nn.Parameter(torch.zeros(1, base_ch, 40, 40))
+        nn.init.trunc_normal_(self.const, std=0.02)
+
+        self._bb_layer_indices: list[int] = []
+        self._gamma: float = 1.0
+
+    @property
+    def fitted(self) -> bool:
+        return self._fitted
+
+    def forward(self, feat_dict: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
+        indices = self._bb_layer_indices if self._bb_layer_indices else sorted(feat_dict.keys())
+        out: dict[int, torch.Tensor] = {}
+        for i, layer_idx in enumerate(indices):
+            if layer_idx not in feat_dict or i >= len(self.style_nets):
+                continue
+            enc_feat = feat_dict[layer_idx]
+            b, _, h, w = enc_feat.shape
+            cond = self.style_nets[i](enc_feat)
+            if cond.shape[2:] != (h, w):
+                cond = F.interpolate(cond, size=(h, w), mode="bilinear", align_corners=False)
+
+            x = self.const.expand(b, -1, -1, -1)
+            if x.shape[2:] != (h, w):
+                x = F.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
+
+            # Encoder
+            skips = []
+            for j, (block, pool) in enumerate(zip(self.enc_blocks[:-1], self.down)):
+                x = block(x, cond)
+                skips.append(x)
+                x = pool(x)
+            x = self.enc_blocks[-1](x, cond)
+
+            # Bottleneck
+            x = self.bottleneck(x, cond)
+
+            # Decoder
+            for j, (up, block) in enumerate(zip(self.up_convs, self.dec_blocks)):
+                x = up(x)
+                skip = skips[-1 - j]
+                if x.shape[2:] != skip.shape[2:]:
+                    x = F.interpolate(x, size=skip.shape[2:], mode="bilinear", align_corners=False)
+                x = block(torch.cat([x, skip], dim=1), cond)
+
+            out[layer_idx] = self.proj_out(x)
+        return out
+
+    def anomaly_map(self, feat_dict: dict[int, torch.Tensor]) -> torch.Tensor:
+        recon = self.forward(feat_dict)
+        maps = []
+        for layer_idx, enc_feat in feat_dict.items():
+            if layer_idx not in recon:
+                continue
+            dec_feat = recon[layer_idx]
+            enc_n = F.normalize(enc_feat, p=2, dim=1)
+            dec_n = F.normalize(dec_feat, p=2, dim=1)
+            dist = (1.0 - (enc_n * dec_n).sum(dim=1, keepdim=True)) * 0.5
+            target_size = max((f.shape[-2:] for f in feat_dict.values()), key=lambda s: s[0])
+            if dist.shape[2:] != target_size:
+                dist = F.interpolate(dist, size=target_size, mode="bilinear", align_corners=False)
+            maps.append(dist)
+        hmap = torch.stack(maps).mean(dim=0) if maps else torch.zeros(1, 1, 80, 80)
+        hmap = hmap.clamp(0, 1)
+        if getattr(self, "_gamma", 1.0) != 1.0:
+            hmap = hmap.pow(self._gamma)
+        return hmap
+
+    def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:
+        indices = self._bb_layer_indices if self._bb_layer_indices else sorted(normal_feats.keys())
+        with torch.inference_mode(False):
+            scale_feats = []
+            for i, layer_idx in enumerate(indices):
+                if layer_idx not in normal_feats or i >= len(self.style_nets):
+                    continue
+                scale_feats.append(normal_feats[layer_idx].float().clone())
+            if not scale_feats:
+                return
+            n = min(f.shape[0] for f in scale_feats)
+            if n < 2:
+                return
+            dev = scale_feats[0].device
+            g = torch.Generator(device="cpu").manual_seed(self.seed)
+            opt = torch.optim.Adam(self.parameters(), lr=self.lr)
+            self.train()
+            bs = min(self.batch, n)
+
+            from ultralytics.utils.tqdm import TQDM
+
+            pbar = TQDM(range(self.steps), desc=f"Training UNet ({n} feats, {len(scale_feats)} scales)", unit="step")
+            for _ in pbar:
+                idx = torch.randint(0, n, (bs,), generator=g).to(dev)
+                mb_feats = {}
+                for j, layer_idx in enumerate(indices):
+                    if j < len(scale_feats):
+                        mb_feats[layer_idx] = scale_feats[j][idx]
+                recon = self.forward(mb_feats)
+                loss = torch.tensor(0.0, device=dev)
+                for layer_idx, enc in mb_feats.items():
+                    if layer_idx not in recon:
+                        continue
+                    dec = recon[layer_idx]
+                    if self.loss_mode == "cosine":
+                        enc_n = F.normalize(enc, p=2, dim=1)
+                        dec_n = F.normalize(dec, p=2, dim=1)
+                        loss = loss + (1.0 - (enc_n * dec_n).sum(dim=1)).mean()
+                    elif self.loss_mode == "mse+cosine":
+                        loss_mse = F.mse_loss(dec, enc)
+                        enc_n = F.normalize(enc, p=2, dim=1)
+                        dec_n = F.normalize(dec, p=2, dim=1)
+                        loss_cos = (1.0 - (enc_n * dec_n).sum(dim=1)).mean()
+                        loss = loss + loss_mse + loss_cos
+                    else:
+                        loss = loss + F.mse_loss(dec, enc)
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                pbar.set_postfix(loss=f"{loss.item():.4f}")
+
+        self.eval()
+        with torch.no_grad():
+            amap_sum, amap_n = 0.0, 0
+            for idx_start in range(0, n, bs):
+                idx = torch.arange(idx_start, min(idx_start + bs, n), device=dev)
+                mb_feats = {}
+                for j, layer_idx in enumerate(indices):
+                    if j < len(scale_feats):
+                        mb_feats[layer_idx] = scale_feats[j][idx]
+                recon = self.forward(mb_feats)
+                msum, n_pix = 0.0, 0
+                for layer_idx, enc in mb_feats.items():
+                    if layer_idx not in recon:
+                        continue
+                    en = F.normalize(recon[layer_idx], p=2, dim=1)
+                    dn = F.normalize(enc, p=2, dim=1)
+                    msum += ((1.0 - (en * dn).sum(dim=1, keepdim=True)) * 0.5).sum()
+                    n_pix += enc.shape[2] * enc.shape[3] * enc.shape[0]
+                amap_sum += msum.item()
+                amap_n += n_pix
+            raw_mean = amap_sum / max(amap_n, 1)
+            TARGET = 0.37
+            import math
+            gamma = math.log(TARGET) / max(math.log(max(raw_mean, 1e-6)), math.log(1e-6))
+            self._gamma = float(max(0.15, min(0.8, gamma)))
+
+        self._fitted = True
+
+
+# ---------------------------------------------------------------------------
+# Diffusion Feature Decoder
+# ---------------------------------------------------------------------------
+
+class _DiffUNet(nn.Module):
+    """Tiny UNet with time embedding + FiLM conditioning for diffusion denoising."""
+
+    def __init__(self, in_ch: int, base_ch: int = 128, cond_ch: int = 64, num_levels: int = 2):
+        super().__init__()
+        self.base_ch = base_ch
+        self.num_levels = num_levels
+        t_embed_ch = base_ch * 4
+
+        # Time embedding
+        self.t_embed = nn.Sequential(
+            nn.Linear(base_ch, t_embed_ch),
+            nn.GELU(),
+            nn.Linear(t_embed_ch, t_embed_ch),
+        )
+
+        chs = [base_ch, base_ch * 2, base_ch * 4][:num_levels + 1]
+        # Encoder
+        self.enc_conv_in = nn.Conv2d(in_ch, chs[0], 3, padding=1)
+        self.enc_blocks = nn.ModuleList([
+            _FiLMBlock(chs[i], chs[i + 1], cond_ch) for i in range(num_levels)
+        ])
+        self.down = nn.ModuleList([nn.MaxPool2d(2) for _ in range(num_levels)])
+
+        # Bottleneck
+        self.bottleneck = nn.Sequential(
+            _FiLMBlock(chs[-1], chs[-1], cond_ch),
+            _FiLMBlock(chs[-1], chs[-1], cond_ch),
+        )
+
+        # Decoder
+        self.up_convs = nn.ModuleList([
+            nn.ConvTranspose2d(chs[-1 - i], chs[-2 - i], 2, stride=2) for i in range(num_levels)
+        ])
+        self.dec_blocks = nn.ModuleList([
+            _FiLMBlock(chs[-2 - i] * 2, chs[-2 - i], cond_ch) for i in range(num_levels)
+        ])
+
+        # Time projection (injected at bottleneck)
+        self.t_proj = nn.Linear(t_embed_ch, chs[-1])
+
+        self.proj_out = nn.Conv2d(chs[0], in_ch, 1)
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        t_emb = self.t_embed(_timestep_embedding(t, self.base_ch))
+        x = self.enc_conv_in(x)
+
+        skips = []
+        for block, pool in zip(self.enc_blocks, self.down):
+            x = block(x, cond)
+            skips.append(x)
+            x = pool(x)
+
+        # Bottleneck with time injection
+        x = self.bottleneck[0](x, cond)
+        x = x + self.t_proj(t_emb).unsqueeze(-1).unsqueeze(-1)
+        x = self.bottleneck[1](x, cond)
+
+        for up, block in zip(self.up_convs, self.dec_blocks):
+            x = up(x)
+            skip = skips[-1]
+            skips = skips[:-1]
+            if x.shape[2:] != skip.shape[2:]:
+                x = F.interpolate(x, size=skip.shape[2:], mode="bilinear", align_corners=False)
+            x = block(torch.cat([x, skip], dim=1), cond)
+
+        return self.proj_out(x)
+
+
+def _timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
+    """Sinusoidal timestep embedding (as in DDPM)."""
+    half = dim // 2
+    freqs = torch.exp(-math.log(10000) * torch.arange(0, half, dtype=torch.float32, device=t.device) / half)
+    args = t.float().unsqueeze(-1) * freqs.unsqueeze(0)
+    return torch.cat([args.sin(), args.cos()], dim=-1)
+
+
+class DiffusionFeatureDecoder(nn.Module):
+    """DDPM-style feature reconstruction for anomaly detection.
+
+    Forward diffusion: add Gaussian noise to backbone features at random timesteps.
+    Reverse: small UNet predicts noise, conditioned on style from encoder features + t.
+    Anomaly = reconstruction error after iterative denoising.
+    """
+
+    def __init__(
+        self,
+        encoder_chs: list[int],
+        unet_ch: int = 128,
+        num_diff_steps: int = 10,
+        cond_ch: int = 64,
+        steps: int = 500,
+        lr: float = 1e-3,
+        batch: int = 16,
+        seed: int = 0,
+        loss_mode: str = "mse+cosine",
+        num_infer_steps: int = 5,
+    ):
+        super().__init__()
+        self.encoder_chs = list(encoder_chs)
+        self.unet_ch = int(unet_ch)
+        self.num_diff_steps = int(num_diff_steps)
+        self.steps = int(steps)
+        self.lr = float(lr)
+        self.batch = int(batch)
+        self.seed = int(seed)
+        self.loss_mode = str(loss_mode)
+        self.num_infer_steps = int(num_infer_steps)
+        self._fitted = False
+
+        enc_ch = encoder_chs[0]
+
+        # Noise schedule: linear beta
+        beta = torch.linspace(1e-4, 0.02, num_diff_steps)
+        alpha = 1.0 - beta
+        alpha_bar = torch.cumprod(alpha, dim=0)
+        self.register_buffer("beta", beta)
+        self.register_buffer("alpha", alpha)
+        self.register_buffer("alpha_bar", alpha_bar)
+
+        self.cond_ch = cond_ch
+        self.style_nets = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(ec, cond_ch * 2, 3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(cond_ch * 2, cond_ch, 3, padding=1),
+            ) for ec in self.encoder_chs
+        ])
+        self.unet = _DiffUNet(enc_ch, base_ch=unet_ch, cond_ch=cond_ch)
+
+        self._bb_layer_indices: list[int] = []
+        self._gamma: float = 1.0
+
+    @property
+    def fitted(self) -> bool:
+        return self._fitted
+
+    def forward(self, feat_dict: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
+        """Iterative denoising inference (DDIM-style)."""
+        indices = self._bb_layer_indices if self._bb_layer_indices else sorted(feat_dict.keys())
+        out: dict[int, torch.Tensor] = {}
+        for i, layer_idx in enumerate(indices):
+            if layer_idx not in feat_dict or i >= len(self.style_nets):
+                continue
+            enc_feat = feat_dict[layer_idx]
+            b, _, h, w = enc_feat.shape
+            cond = self.style_nets[i](enc_feat)
+            if cond.shape[2:] != (h, w):
+                cond = F.interpolate(cond, size=(h, w), mode="bilinear", align_corners=False)
+
+            # DDIM steps: leap from T to 0 in num_infer_steps
+            step_size = self.num_diff_steps // self.num_infer_steps
+            ts = list(range(self.num_diff_steps - 1, -1, -step_size))
+            xt = torch.randn(b, self.encoder_chs[i], h, w, device=enc_feat.device)
+            for j, ts_val in enumerate(ts):
+                t = torch.full((b,), ts_val, device=enc_feat.device, dtype=torch.long)
+                eps_pred = self.unet(xt, t, cond)
+                if j < len(ts) - 1:
+                    t_next = ts[j + 1]
+                    alpha_bar_t = self.alpha_bar[ts_val]
+                    alpha_bar_next = self.alpha_bar[t_next] if t_next >= 0 else torch.tensor(1.0, device=xt.device)
+                    # DDIM update
+                    pred_x0 = (xt - (1 - alpha_bar_t).sqrt() * eps_pred) / alpha_bar_t.sqrt().clamp(min=1e-8)
+                    xt = alpha_bar_next.sqrt() * pred_x0 + (1 - alpha_bar_next).sqrt() * eps_pred
+            out[layer_idx] = xt
+        return out
+
+    def anomaly_map(self, feat_dict: dict[int, torch.Tensor]) -> torch.Tensor:
+        recon = self.forward(feat_dict)
+        maps = []
+        for layer_idx, enc_feat in feat_dict.items():
+            if layer_idx not in recon:
+                continue
+            dec_feat = recon[layer_idx]
+            enc_n = F.normalize(enc_feat, p=2, dim=1)
+            dec_n = F.normalize(dec_feat, p=2, dim=1)
+            dist = (1.0 - (enc_n * dec_n).sum(dim=1, keepdim=True)) * 0.5
+            target_size = max((f.shape[-2:] for f in feat_dict.values()), key=lambda s: s[0])
+            if dist.shape[2:] != target_size:
+                dist = F.interpolate(dist, size=target_size, mode="bilinear", align_corners=False)
+            maps.append(dist)
+        hmap = torch.stack(maps).mean(dim=0) if maps else torch.zeros(1, 1, 80, 80)
+        hmap = hmap.clamp(0, 1)
+        if getattr(self, "_gamma", 1.0) != 1.0:
+            hmap = hmap.pow(self._gamma)
+        return hmap
+
+    def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:
+        indices = self._bb_layer_indices if self._bb_layer_indices else sorted(normal_feats.keys())
+        with torch.inference_mode(False):
+            scale_feats = []
+            for i, layer_idx in enumerate(indices):
+                if layer_idx not in normal_feats or i >= len(self.style_nets):
+                    continue
+                scale_feats.append(normal_feats[layer_idx].float().clone())
+            if not scale_feats:
+                return
+            n = min(f.shape[0] for f in scale_feats)
+            if n < 2:
+                return
+            dev = scale_feats[0].device
+            g = torch.Generator(device="cpu").manual_seed(self.seed)
+            opt = torch.optim.Adam(self.parameters(), lr=self.lr)
+            self.train()
+            bs = min(self.batch, n)
+
+            from ultralytics.utils.tqdm import TQDM
+
+            pbar = TQDM(range(self.steps), desc=f"Training Diffusion ({n} feats)", unit="step")
+            for _ in pbar:
+                idx = torch.randint(0, n, (bs,), generator=g).to(dev)
+                loss = torch.tensor(0.0, device=dev)
+                for j, layer_idx in enumerate(indices):
+                    if j >= len(scale_feats):
+                        continue
+                    enc = scale_feats[j][idx]  # (bs, C, H, W)
+                    # Sample timesteps
+                    t = torch.randint(0, self.num_diff_steps, (bs,), device=dev)
+                    # Add noise
+                    alpha_bar_t = self.alpha_bar[t].view(-1, 1, 1, 1)
+                    eps = torch.randn_like(enc)
+                    xt = alpha_bar_t.sqrt() * enc + (1 - alpha_bar_t).sqrt() * eps
+                    # Get conditioning
+                    cond = self.style_nets[j](enc)
+                    # Predict noise
+                    eps_pred = self.unet(xt, t, cond)
+                    loss = loss + F.mse_loss(eps_pred, eps)
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                pbar.set_postfix(loss=f"{loss.item():.4f}")
+
+        self.eval()
+        with torch.no_grad():
+            amap_sum, amap_n = 0.0, 0
+            for idx_start in range(0, min(n, 200), bs):
+                idx_e = min(idx_start + bs, n)
+                idx = torch.arange(idx_start, idx_e, device=dev)
+                mb_feats = {}
+                for j, layer_idx in enumerate(indices):
+                    if j < len(scale_feats):
+                        mb_feats[layer_idx] = scale_feats[j][idx]
+                recon = self.forward(mb_feats)
+                msum, n_pix = 0.0, 0
+                for layer_idx, enc in mb_feats.items():
+                    if layer_idx not in recon:
+                        continue
+                    en = F.normalize(recon[layer_idx], p=2, dim=1)
+                    dn = F.normalize(enc, p=2, dim=1)
+                    msum += ((1.0 - (en * dn).sum(dim=1, keepdim=True)) * 0.5).sum()
+                    n_pix += enc.shape[2] * enc.shape[3] * enc.shape[0]
+                amap_sum += msum.item()
+                amap_n += n_pix
+            raw_mean = amap_sum / max(amap_n, 1)
+            TARGET = 0.37
             import math
             gamma = math.log(TARGET) / max(math.log(max(raw_mean, 1e-6)), math.log(1e-6))
             self._gamma = float(max(0.15, min(0.8, gamma)))

@@ -1,0 +1,243 @@
+"""InvAD v3 grid search — expanded architectures (SSM variants + UNet + Diffusion).
+
+Key changes from v2:
+  - max_images=0 (all training images, matches bank baseline)
+  - batch=32 (was 8)
+  - New archs: UNetFeatureDecoder, DiffusionFeatureDecoder
+  - SSM now has residual_mode + norm_type
+
+Usage on ultra6 (4 GPUs):
+  CUDA_VISIBLE_DEVICES=4 nohup /home/louis/miniconda3/envs/ultra/bin/python tune_invad_v3.py --gpu 0 --total-gpus 4 > runs/temp/invad_v3_gpu0.log 2>&1 &
+  ... (same for gpu 1,2,3 with CUDA_VISIBLE_DEVICES=5,6,7)
+"""
+import sys; sys.path.insert(0, ".")
+import logging; logging.getLogger("ultralytics").setLevel(logging.WARNING)
+from pathlib import Path
+import argparse, csv, json, math, random, time, numpy as np, traceback, os
+from ultralytics.yoloa import YOLOA
+from ultralytics.models.yolo.anomaly_v2.val import run_mvtec_ood_eval
+
+# -- CLI ------------------------------------------------------------------
+ap = argparse.ArgumentParser()
+ap.add_argument("--gpu", type=int, default=0)
+ap.add_argument("--total-gpus", type=int, default=4)
+args = ap.parse_args()
+
+GPU_RANK = args.gpu
+GPU_COUNT = args.total_gpus
+DEVICE = "cuda:0"
+
+# -- Paths & constants -----------------------------------------------------
+CKPT = "/home/louis/ultra_louis_work/expman/data/pulled/yoloa_clean/26m_yoloav2_softhint_maskonly_aug3_mixup_ood_aug2x_ep15_lr2x_v1/weights/best.pt"
+ROOT = Path("/data/shared-datasets/louis_data/MVTec-YOLO/MVTec-YOLO")
+IMGSZ = 640
+CATS = ["bottle", "cable", "screw", "zipper", "toothbrush"]
+
+# Verified on ultra6 (2026-07-02)
+BANK_BASELINE = {
+    "bottle":     {"mAP10": 0.8087, "mAP25": 0.6408, "mAP50": 0.1929},
+    "cable":      {"mAP10": 0.3599, "mAP25": 0.2543, "mAP50": 0.0591},
+    "screw":      {"mAP10": 0.3273, "mAP25": 0.0830, "mAP50": 0.0143},
+    "zipper":     {"mAP10": 0.9555, "mAP25": 0.9196, "mAP50": 0.5203},
+    "toothbrush": {"mAP10": 0.5251, "mAP25": 0.2581, "mAP50": 0.1012},
+}
+
+BB_LAYERS = [6]
+
+# -- Config builder --------------------------------------------------------
+def make_configs():
+    cfgs = []
+
+    # ==================================================================
+    # Block 1: SSM anchor — best settings from v2, sweep loss/lr/steps
+    # ==================================================================
+    ssm_base = {"arch": "ssm", "batch": 32, "decoder_ch": 256, "num_blocks": 4,
+                "style_ch": 64, "residual_mode": "block", "norm_type": "instance"}
+    for loss in ["mse", "cosine", "mse+cosine"]:
+        for lr in [5e-4, 1e-3, 2e-3]:
+            for st in [1000, 2000, 4000]:
+                d = dict(ssm_base, loss_mode=loss, lr=lr, steps=st)
+                name = f"ssm_L{loss[:3]}_lr{lr}_s{st}"
+                cfgs.append((name, d))
+
+    # ==================================================================
+    # Block 2: SSM residual_mode × norm_type
+    # ==================================================================
+    ssm_res = dict(ssm_base, loss_mode="mse+cosine", lr=1e-3, steps=2000)
+    for rm in ["block", "none", "inter_block", "dense"]:
+        for nt in ["instance", "group", "batch"]:
+            d = dict(ssm_res, residual_mode=rm, norm_type=nt)
+            name = f"ssm_res{rm[:4]}_n{nt[:3]}"
+            cfgs.append((name, d))
+
+    # ==================================================================
+    # Block 3: SSM architecture random (20 combos)
+    # ==================================================================
+    rng = random.Random(42)
+    ssm_arch_base = dict(ssm_base, loss_mode="mse+cosine", lr=1e-3, steps=2000,
+                         residual_mode="block")
+    for _ in range(20):
+        dch = rng.choice([128, 256, 512])
+        nb = rng.choice([2, 4, 6, 8])
+        sty = rng.choice([32, 64, 128, 256])
+        nt = rng.choice(["instance", "group", "batch"])
+        rm = rng.choice(["block", "none", "inter_block", "dense"])
+        d = dict(ssm_arch_base, decoder_ch=dch, num_blocks=nb, style_ch=sty,
+                 norm_type=nt, residual_mode=rm)
+        name = f"ssm_r_dch{dch}_nb{nb}_sty{sty}_{nt[:3]}_res{rm[:4]}"
+        cfgs.append((name, d))
+
+    # ==================================================================
+    # Block 4: UNet decoder
+    # ==================================================================
+    unet_base = {"arch": "unet", "batch": 32, "loss_mode": "mse+cosine"}
+    for base_ch in [64, 128]:
+        for num_lv in [2, 3]:
+            for st in [1000, 2000]:
+                for lr in [5e-4, 1e-3]:
+                    d = dict(unet_base, base_ch=base_ch, num_levels=num_lv,
+                            steps=st, lr=lr)
+                    name = f"unet_ch{base_ch}_lv{num_lv}_s{st}_lr{lr}"
+                    cfgs.append((name, d))
+
+    # ==================================================================
+    # Block 5: Diffusion decoder
+    # ==================================================================
+    diff_base = {"arch": "diffusion", "batch": 16, "loss_mode": "mse+cosine",
+                 "num_infer_steps": 5}
+    for u_ch in [64, 128]:
+        for n_diff in [5, 10]:
+            for st in [1000, 2000]:
+                for lr in [5e-4, 1e-3]:
+                    d = dict(diff_base, unet_ch=u_ch, num_diff_steps=n_diff,
+                            steps=st, lr=lr)
+                    name = f"diff_u{u_ch}_t{n_diff}_s{st}_lr{lr}"
+                    cfgs.append((name, d))
+
+    return cfgs
+
+
+CONFIGS = make_configs()
+my_configs = [(name, kw) for i, (name, kw) in enumerate(CONFIGS) if i % GPU_COUNT == GPU_RANK]
+
+print(f"[gpu{GPU_RANK}/{GPU_COUNT}] total: {len(CONFIGS)} configs, my share: {len(my_configs)}", flush=True)
+
+# -- Output paths ----------------------------------------------------------
+SUFFIX = f"_gpu{GPU_RANK}"
+OUT_CSV = Path(f"runs/temp/invad_v3_tune{SUFFIX}.csv")
+OUT_PROG = Path(f"runs/temp/invad_v3_progress{SUFFIX}.json")
+LOG = Path(f"runs/temp/invad_v3_tune{SUFFIX}.log")
+OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+
+def log(msg):
+    line = f"[{time.strftime('%H:%M:%S')}] gpu{GPU_RANK} {msg}"
+    print(line, flush=True)
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
+
+if not OUT_PROG.exists():
+    LOG.write_text("")
+
+log(f"InvAD v3 tune | {len(my_configs)} configs × {len(CATS)} cats | device={DEVICE}")
+log(f"max_images=0 (all data), batch=32, bb_layers={BB_LAYERS}")
+
+# -- Load progress ---------------------------------------------------------
+done = set()
+if OUT_PROG.exists():
+    try:
+        d = json.loads(OUT_PROG.read_text())
+        done = set(d.get("done", []))
+        log(f"Resuming: {len(done)} done")
+    except Exception:
+        pass
+
+fieldnames = ["category", "config", "arch", "loss_mode", "lr", "steps",
+              "decoder_ch", "style_ch", "num_blocks", "residual_mode", "norm_type",
+              "base_ch", "num_levels", "unet_ch", "num_diff_steps", "num_infer_steps",
+              "bank_mAP10", "invad_mAP10", "delta_mAP10",
+              "bank_mAP25", "invad_mAP25", "delta_mAP25",
+              "bank_mAP50", "invad_mAP50", "delta_mAP50",
+              "invad_im_auroc", "invad_px_auroc", "gamma"]
+if not OUT_CSV.exists():
+    with open(OUT_CSV, "w", newline="") as f:
+        csv.DictWriter(f, fieldnames=fieldnames).writeheader()
+
+rows = []
+for cfg_name, kw in my_configs:
+    if cfg_name in done:
+        continue
+
+    arch = kw.get("arch", "ssm")
+    log(f"\n--- {cfg_name} [{arch}] {kw} ---")
+    cat_results = {}
+
+    for cat in CATS:
+        key = f"{cfg_name}_{cat}"
+        if key in done:
+            log(f"  [SKIP] {cat}")
+            continue
+
+        log(f"  {cat}...")
+        try:
+            m = YOLOA(CKPT)
+            m.model.to(DEVICE)
+            gd = str(ROOT / cat / "train/good")
+
+            m.fit(gd, name=cat, imgsz=IMGSZ, max_images=0, refit=True,
+                  bb_layers=BB_LAYERS, fit_decoder=kw)
+
+            dec = m.model._feat_inv_decoder
+            gamma = dec._gamma if dec else float("nan")
+            m.model.set_prior_mode("heatmap_reconstruct")
+            d_rows = run_mvtec_ood_eval(m.model, ROOT, categories=[cat],
+                                        modes=("heatmap_reconstruct",), imgsz=IMGSZ,
+                                        batch=4, device=DEVICE)
+            d = [x for x in d_rows if x["category"] == cat and x.get("mode") == "heatmap_reconstruct"][0]
+            b = BANK_BASELINE[cat]
+            row = {
+                "category": cat, "config": cfg_name, "arch": arch,
+                "loss_mode": kw.get("loss_mode", ""),
+                "lr": kw.get("lr", 0),
+                "steps": kw.get("steps", 0),
+                "decoder_ch": kw.get("decoder_ch", 0) if arch == "ssm" else "",
+                "style_ch": kw.get("style_ch", 0) if arch == "ssm" else "",
+                "num_blocks": kw.get("num_blocks", 0) if arch == "ssm" else "",
+                "residual_mode": kw.get("residual_mode", "") if arch == "ssm" else "",
+                "norm_type": kw.get("norm_type", "") if arch != "diffusion" else "",
+                "base_ch": kw.get("base_ch", 0) if arch == "unet" else "",
+                "num_levels": kw.get("num_levels", 0) if arch == "unet" else "",
+                "unet_ch": kw.get("unet_ch", 0) if arch == "diffusion" else "",
+                "num_diff_steps": kw.get("num_diff_steps", 0) if arch == "diffusion" else "",
+                "num_infer_steps": kw.get("num_infer_steps", 0) if arch == "diffusion" else "",
+                "bank_mAP10": b["mAP10"], "invad_mAP10": round(d["mAP10"], 4),
+                "delta_mAP10": round(d["mAP10"] - b["mAP10"], 4),
+                "bank_mAP25": b["mAP25"], "invad_mAP25": round(d["mAP25"], 4),
+                "delta_mAP25": round(d["mAP25"] - b["mAP25"], 4),
+                "bank_mAP50": b["mAP50"], "invad_mAP50": round(d["mAP50"], 4),
+                "delta_mAP50": round(d["mAP50"] - b["mAP50"], 4),
+                "invad_im_auroc": round(d["image_auroc"], 4),
+                "invad_px_auroc": round(d["pixel_auroc"], 4),
+                "gamma": round(gamma, 4),
+            }
+            cat_results[cat] = row
+            log(f"    mAP10={row['invad_mAP10']:.4f} (Δ{row['delta_mAP10']:+.4f})  "
+                f"mAP25={row['invad_mAP25']:.4f} (Δ{row['delta_mAP25']:+.4f})  "
+                f"γ={row['gamma']:.4f}")
+        except Exception as e:
+            log(f"  FAILED: {e}")
+            traceback.print_exc()
+            continue
+
+        rows.append(row)
+        with open(OUT_CSV, "a", newline="") as f:
+            csv.DictWriter(f, fieldnames=fieldnames).writerow(row)
+        done.add(key)
+        OUT_PROG.write_text(json.dumps({"done": list(done), "gpu": GPU_RANK}))
+
+    if cat_results:
+        avgs = {k: round(float(np.mean([r[k] for r in cat_results.values()])), 4)
+                for k in ["invad_mAP10", "delta_mAP10", "invad_mAP25", "delta_mAP25"]}
+        avg_b = round(float(np.mean([BANK_BASELINE[c]["mAP10"] for c in CATS])), 4)
+        log(f"  AVG: mAP10={avgs['invad_mAP10']} (Δ{avgs['delta_mAP10']:+.4f}) vs bank={avg_b}")
+
+log(f"\nDONE — {len(rows)} rows saved to {OUT_CSV}")

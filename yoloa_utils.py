@@ -16,8 +16,10 @@ MVTEC_OBJECT = ["bottle", "cable", "capsule", "hazelnut", "metal_nut", "pill", "
                 "toothbrush", "transistor", "zipper"]
 MVTEC_TEXTURE = ["carpet", "grid", "leather", "tile", "wood"]
 MVTEC_RANDOM=["bottle", "cable", "capsule", "carpet", "grid"]
+MVTEC_5CLASS = ["bottle", "cable", "screw", "zipper", "toothbrush"]
 
-CAT_GROUPS = {"object": MVTEC_OBJECT, "texture": MVTEC_TEXTURE, "random5": MVTEC_RANDOM}
+CAT_GROUPS = {"object": MVTEC_OBJECT, "texture": MVTEC_TEXTURE, "random5": MVTEC_RANDOM,
+              "5class": MVTEC_5CLASS, "invad5": MVTEC_5CLASS}
 VAL_METRICS = ("image_auroc", "pixel_auroc", "mAP10", "mAP25", "mAP50", "mAP50_95")
 
 # YAML heatmap_mode -> prior_mode

@@ -39,6 +39,32 @@ __all__ = (
 )
 
 
+def _apply_calibration(hmap: torch.Tensor, mode: str = "none") -> torch.Tensor:
+    """Apply value-range calibration to a [B,1,H,W] heatmap in [0,1].
+
+    Supported modes:
+        "none"    — identity (raw cosine distance)
+        "gamma"   — power-law hmap^γ, γ computed so E[normal] ≈ 0.37 (old method)
+        "minmax"  — per-image linear stretch to [0,1]
+        "zscore"  — per-image z-score, ±3σ clamp, remap to [0,1]
+    """
+    if mode == "none":
+        return hmap
+    if mode == "minmax":
+        h_min = hmap.amin(dim=[2, 3], keepdim=True)
+        h_max = hmap.amax(dim=[2, 3], keepdim=True)
+        denom = (h_max - h_min).clamp(min=1e-8)
+        return (hmap - h_min) / denom
+    if mode == "zscore":
+        mean = hmap.mean(dim=[2, 3], keepdim=True)
+        std = hmap.std(dim=[2, 3], keepdim=True).clamp(min=1e-6)
+        z = (hmap - mean) / std
+        return (z / 3.0).clamp(-1, 1) * 0.5 + 0.5
+    if mode == "gamma":
+        return hmap  # gamma applied inside anomaly_map via _gamma attr
+    return hmap
+
+
 class BboxMaskRenderer(nn.Module):
     """Render normalized YOLO-format bboxes into a 1xHxW mask.
 
@@ -1509,6 +1535,7 @@ class FeatureInversionDecoder(nn.Module):
         # -- Layer index mapping (set by caller) --
         self._bb_layer_indices: list[int] = []
         self._gamma: float = 1.0  # power-law calibration (computed in fit())
+        self._cal_mode: str = "none"  # none | gamma | minmax | zscore
 
     @property
     def fitted(self) -> bool:
@@ -1589,6 +1616,7 @@ class FeatureInversionDecoder(nn.Module):
         hmap = hmap.clamp(0, 1)
         if getattr(self, "_gamma", 1.0) != 1.0:
             hmap = hmap.pow(self._gamma)
+        hmap = _apply_calibration(hmap, getattr(self, "_cal_mode", "none"))
         return hmap
 
     def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:
@@ -1791,6 +1819,7 @@ class UNetFeatureDecoder(nn.Module):
 
         self._bb_layer_indices: list[int] = []
         self._gamma: float = 1.0
+        self._cal_mode: str = "none"
 
     @property
     def fitted(self) -> bool:
@@ -1858,6 +1887,7 @@ class UNetFeatureDecoder(nn.Module):
         hmap = hmap.clamp(0, 1)
         if getattr(self, "_gamma", 1.0) != 1.0:
             hmap = hmap.pow(self._gamma)
+        hmap = _apply_calibration(hmap, getattr(self, "_cal_mode", "none"))
         return hmap
 
     def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:
@@ -2080,6 +2110,7 @@ class DiffusionFeatureDecoder(nn.Module):
 
         self._bb_layer_indices: list[int] = []
         self._gamma: float = 1.0
+        self._cal_mode: str = "none"
 
     @property
     def fitted(self) -> bool:
@@ -2137,6 +2168,7 @@ class DiffusionFeatureDecoder(nn.Module):
         hmap = hmap.clamp(0, 1)
         if getattr(self, "_gamma", 1.0) != 1.0:
             hmap = hmap.pow(self._gamma)
+        hmap = _apply_calibration(hmap, getattr(self, "_cal_mode", "none"))
         return hmap
 
     def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:

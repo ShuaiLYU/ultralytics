@@ -151,6 +151,8 @@ OUT_CSV = Path(f"runs/temp/invad_v3_tune{SUFFIX}.csv")
 OUT_PROG = Path(f"runs/temp/invad_v3_progress{SUFFIX}.json")
 LOG = Path(f"runs/temp/invad_v3_tune{SUFFIX}.log")
 OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+DECODER_DIR = OUT_CSV.parent / "decoders"
+DECODER_DIR.mkdir(parents=True, exist_ok=True)
 
 def log(msg):
     line = f"[{time.strftime('%H:%M:%S')}] g{GPU_INDEX}w{W_INDEX} {msg}"
@@ -213,6 +215,10 @@ for cfg_name, kw in my_configs:
 
             dec = m.model._feat_inv_decoder
             gamma = dec._gamma if dec else float("nan")
+
+            # Save decoder weights for Step 2 calibration sweep
+            torch.save(dec.state_dict(), DECODER_DIR / f"{cfg_name}_{cat}.pt")
+
             m.model.set_prior_mode("heatmap_reconstruct")
             d_rows = run_mvtec_ood_eval(m.model, ROOT, categories=[cat],
                                         modes=("heatmap_reconstruct",), imgsz=IMGSZ,
@@ -247,9 +253,9 @@ for cfg_name, kw in my_configs:
                 "gamma": round(gamma, 4),
             }
             cat_results[cat] = row
-            log(f"    mAP10={row['invad_mAP10']:.4f} (Δ{row['delta_mAP10']:+.4f})  "
-                f"mAP25={row['invad_mAP25']:.4f} (Δ{row['delta_mAP25']:+.4f})  "
-                f"γ={row['gamma']:.4f}")
+            log(f"    px_auroc={row['invad_px_auroc']:.4f} (Δ{row['delta_px_auroc']:+.4f})  "
+                f"im_auroc={row['invad_im_auroc']:.4f} (Δ{row['delta_im_auroc']:+.4f})  "
+                f"mAP10={row['invad_mAP10']:.4f} (Δ{row['delta_mAP10']:+.4f})")
         except Exception as e:
             log(f"  FAILED: {e}")
             traceback.print_exc()
@@ -263,11 +269,12 @@ for cfg_name, kw in my_configs:
 
     if cat_results:
         avgs = {k: round(float(np.mean([r[k] for r in cat_results.values()])), 4)
-                for k in ["invad_mAP10", "delta_mAP10", "invad_im_auroc", "delta_im_auroc",
-                          "invad_px_auroc", "delta_px_auroc"]}
+                for k in ["invad_px_auroc", "delta_px_auroc",
+                          "invad_im_auroc", "delta_im_auroc",
+                          "invad_mAP10", "delta_mAP10"]}
+        avg_b_px = round(float(np.mean([BANK_BASELINE[c]["px_auroc"] for c in CATS])), 4)
         avg_b_m = round(float(np.mean([BANK_BASELINE[c]["mAP10"] for c in CATS])), 4)
-        avg_b_im = round(float(np.mean([BANK_BASELINE[c]["im_auroc"] for c in CATS])), 4)
-        log(f"  AVG: mAP10={avgs['invad_mAP10']} (Δ{avgs['delta_mAP10']:+.4f}) vs bank_mAP10={avg_b_m}  "
-            f"im_auc={avgs['invad_im_auroc']} (Δ{avgs['delta_im_auroc']:+.4f}) vs bank_im={avg_b_im}")
+        log(f"  AVG: px_auroc={avgs['invad_px_auroc']} (Δ{avgs['delta_px_auroc']:+.4f}) vs bank_px={avg_b_px}  "
+            f"mAP10={avgs['invad_mAP10']} (Δ{avgs['delta_mAP10']:+.4f}) vs bank_mAP10={avg_b_m}")
 
 log(f"\nDONE — {len(rows)} rows saved to {OUT_CSV}")

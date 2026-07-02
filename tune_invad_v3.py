@@ -57,7 +57,8 @@ def make_configs():
         for lr in [5e-4, 1e-3, 2e-3]:
             for st in [1000, 2000, 4000]:
                 d = dict(ssm_base, loss_mode=loss, lr=lr, steps=st)
-                name = f"ssm_L{loss[:3]}_lr{lr}_s{st}"
+                loss_tag = loss[:3] if loss != "mse+cosine" else "msc"
+                name = f"ssm_L{loss_tag}_lr{lr}_s{st}"
                 cfgs.append((name, d))
 
     # ==================================================================
@@ -76,15 +77,19 @@ def make_configs():
     rng = random.Random(42)
     ssm_arch_base = dict(ssm_base, loss_mode="mse+cosine", lr=1e-3, steps=2000,
                          residual_mode="block")
-    for _ in range(20):
+    seen_random = set()
+    while len(cfgs) < 39 + 20:  # 39 = first 3 blocks, 20 = random block size
         dch = rng.choice([128, 256, 512])
         nb = rng.choice([2, 4, 6, 8])
         sty = rng.choice([32, 64, 128, 256])
         nt = rng.choice(["instance", "group", "batch"])
         rm = rng.choice(["block", "none", "inter_block", "dense"])
+        name = f"ssm_r_dch{dch}_nb{nb}_sty{sty}_{nt[:3]}_res{rm[:4]}"
+        if name in seen_random:
+            continue
+        seen_random.add(name)
         d = dict(ssm_arch_base, decoder_ch=dch, num_blocks=nb, style_ch=sty,
                  norm_type=nt, residual_mode=rm)
-        name = f"ssm_r_dch{dch}_nb{nb}_sty{sty}_{nt[:3]}_res{rm[:4]}"
         cfgs.append((name, d))
 
     # ==================================================================

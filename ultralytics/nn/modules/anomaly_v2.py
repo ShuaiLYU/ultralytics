@@ -1479,11 +1479,14 @@ class FeatureInversionDecoder(nn.Module):
             for _ in self.encoder_chs
         ])
 
-        # -- Dense projection (1×1 to reduce concat back to decoder_ch) --
+        # -- Dense projection (per-block 1×1 convs to reduce concat back to decoder_ch) --
         self._dense_proj: nn.ModuleList | None = None
         if residual_mode == "dense" and num_blocks > 1:
             self._dense_proj = nn.ModuleList([
-                nn.Conv2d(decoder_ch * num_blocks, decoder_ch, 1)
+                nn.ModuleList([
+                    nn.Conv2d(decoder_ch * (k + 1), decoder_ch, 1)
+                    for k in range(num_blocks - 1)
+                ])
                 for _ in self.encoder_chs
             ])
 
@@ -1539,9 +1542,12 @@ class FeatureInversionDecoder(nn.Module):
 
             if self.residual_mode == "dense" and self.num_blocks > 1:
                 block_outs = []
-                for ssm in self.blocks[i]:
-                    block_outs.append(ssm(x, gamma, beta))
-                    x = self._dense_proj[i](torch.cat(block_outs, dim=1))
+                for k, ssm in enumerate(self.blocks[i]):
+                    block_out = ssm(x, gamma, beta)
+                    block_outs.append(block_out)
+                    if k < len(self.blocks[i]) - 1:
+                        x = self._dense_proj[i][k](torch.cat(block_outs, dim=1))
+                x = block_out
             elif self.residual_mode == "inter_block" and self.num_blocks > 1:
                 for blk_idx, ssm in enumerate(self.blocks[i]):
                     if blk_idx == 0:

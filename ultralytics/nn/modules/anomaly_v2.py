@@ -2064,8 +2064,13 @@ class DiffusionFeatureDecoder(nn.Module):
 
         enc_ch = encoder_chs[0]
 
-        # Noise schedule: linear beta
-        beta = torch.linspace(1e-4, 0.02, num_diff_steps)
+        # Noise schedule: linear beta scaled so final alpha_bar ≈ 0.02 at max t
+        # With original β_max=0.02, ᾱ_N was ~0.99 (features barely noised → trivial prediction of 0)
+        # Now β_max scales per step count to ensure proper noise corruption
+        target_alpha_bar = 0.02
+        # For linear schedule: log(ᾱ_N) ≈ -0.5*(β₁ + β_N)*N → β_N ≈ 2*|ln(ᾱ_N)|/N - β₁
+        beta_max = min(0.9, max(0.3, 2 * abs(math.log(target_alpha_bar)) / max(num_diff_steps, 1) - 1e-4))
+        beta = torch.linspace(1e-4, beta_max, num_diff_steps)
         alpha = 1.0 - beta
         alpha_bar = torch.cumprod(alpha, dim=0)
         self.register_buffer("beta", beta)

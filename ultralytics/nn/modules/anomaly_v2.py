@@ -1815,16 +1815,22 @@ class UNetFeatureDecoder(nn.Module):
             if x.shape[2:] != (h, w):
                 x = F.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
 
+            # Helper: interpolate cond to match x spatial size
+            def _cond_at(cond_full, target):
+                if cond_full.shape[2:] != target.shape[2:]:
+                    return F.interpolate(cond_full, size=target.shape[2:], mode="bilinear", align_corners=False)
+                return cond_full
+
             # Encoder
             skips = []
             for j, (block, pool) in enumerate(zip(self.enc_blocks[:-1], self.down)):
-                x = block(x, cond)
+                x = block(x, _cond_at(cond, x))
                 skips.append(x)
                 x = pool(x)
-            x = self.enc_blocks[-1](x, cond)
+            x = self.enc_blocks[-1](x, _cond_at(cond, x))
 
             # Bottleneck
-            x = self.bottleneck(x, cond)
+            x = self.bottleneck(x, _cond_at(cond, x))
 
             # Decoder
             for j, (up, block) in enumerate(zip(self.up_convs, self.dec_blocks)):
@@ -1832,7 +1838,7 @@ class UNetFeatureDecoder(nn.Module):
                 skip = skips[-1 - j]
                 if x.shape[2:] != skip.shape[2:]:
                     x = F.interpolate(x, size=skip.shape[2:], mode="bilinear", align_corners=False)
-                x = block(torch.cat([x, skip], dim=1), cond)
+                x = block(torch.cat([x, skip], dim=1), _cond_at(cond, x))
 
             out[layer_idx] = self.proj_out(x)
         return out
@@ -1985,19 +1991,24 @@ class _DiffUNet(nn.Module):
         self.proj_out = nn.Conv2d(chs[0], in_ch, 1)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        def _c(c_full, ref):
+            if c_full.shape[2:] != ref.shape[2:]:
+                return F.interpolate(c_full, size=ref.shape[2:], mode="bilinear", align_corners=False)
+            return c_full
+
         t_emb = self.t_embed(_timestep_embedding(t, self.base_ch))
         x = self.enc_conv_in(x)
 
         skips = []
         for block, pool in zip(self.enc_blocks, self.down):
-            x = block(x, cond)
+            x = block(x, _c(cond, x))
             skips.append(x)
             x = pool(x)
 
         # Bottleneck with time injection
-        x = self.bottleneck[0](x, cond)
+        x = self.bottleneck[0](x, _c(cond, x))
         x = x + self.t_proj(t_emb).unsqueeze(-1).unsqueeze(-1)
-        x = self.bottleneck[1](x, cond)
+        x = self.bottleneck[1](x, _c(cond, x))
 
         for up, block in zip(self.up_convs, self.dec_blocks):
             x = up(x)
@@ -2005,7 +2016,7 @@ class _DiffUNet(nn.Module):
             skips = skips[:-1]
             if x.shape[2:] != skip.shape[2:]:
                 x = F.interpolate(x, size=skip.shape[2:], mode="bilinear", align_corners=False)
-            x = block(torch.cat([x, skip], dim=1), cond)
+            x = block(torch.cat([x, skip], dim=1), _c(cond, x))
 
         return self.proj_out(x)
 

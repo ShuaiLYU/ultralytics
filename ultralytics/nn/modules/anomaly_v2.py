@@ -1433,6 +1433,7 @@ class FeatureInversionDecoder(nn.Module):
         lr: float = 1e-3,
         batch: int = 8,
         seed: int = 0,
+        loss_mode: str = "mse",
     ):
         super().__init__()
         self.encoder_chs = list(encoder_chs)
@@ -1443,6 +1444,7 @@ class FeatureInversionDecoder(nn.Module):
         self.lr = float(lr)
         self.batch = int(batch)
         self.seed = int(seed)
+        self.loss_mode = str(loss_mode)
         self._fitted = False
 
         # -- Per-scale style translators (bottleneck: enc_ch → 2*style_ch → 2*decoder_ch) --
@@ -1546,7 +1548,8 @@ class FeatureInversionDecoder(nn.Module):
     def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:
         """Train the decoder on normal backbone features.
 
-        Pure MSE loss — the decoder learns to reconstruct normal feature patterns.
+        Loss depends on ``self.loss_mode``: ``"mse"`` (magnitude), ``"cosine"`` (angular,
+        aligned with the anomaly scoring metric), or ``"mse+cosine"``.
         Backbone is frozen (features are pre-extracted).
 
         Args:
@@ -1592,8 +1595,21 @@ class FeatureInversionDecoder(nn.Module):
                 recon = self.forward(mb_feats)
                 loss = torch.tensor(0.0, device=dev)
                 for layer_idx, enc in mb_feats.items():
-                    if layer_idx in recon:
-                        loss = loss + F.mse_loss(recon[layer_idx], enc)
+                    if layer_idx not in recon:
+                        continue
+                    dec = recon[layer_idx]
+                    if self.loss_mode == "cosine":
+                        enc_n = F.normalize(enc, p=2, dim=1)
+                        dec_n = F.normalize(dec, p=2, dim=1)
+                        loss = loss + (1.0 - (enc_n * dec_n).sum(dim=1)).mean()
+                    elif self.loss_mode == "mse+cosine":
+                        loss_mse = F.mse_loss(dec, enc)
+                        enc_n = F.normalize(enc, p=2, dim=1)
+                        dec_n = F.normalize(dec, p=2, dim=1)
+                        loss_cos = (1.0 - (enc_n * dec_n).sum(dim=1)).mean()
+                        loss = loss + loss_mse + loss_cos
+                    else:  # mse
+                        loss = loss + F.mse_loss(dec, enc)
 
                 opt.zero_grad()
                 loss.backward()

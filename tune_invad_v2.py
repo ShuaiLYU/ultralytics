@@ -143,6 +143,7 @@ for cfg_name, kw in my_configs:
         log(f"  {cat}...")
         try:
             m = YOLOA(CKPT)
+            m.model.to(DEVICE)
             gd = str(ROOT / cat / "train/good")
 
             # Build fit kwargs: split bb_layers (handled by m.fit) from decoder kwargs

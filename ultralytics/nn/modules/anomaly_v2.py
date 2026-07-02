@@ -20,6 +20,19 @@ import torch.nn.functional as F
 
 from .conv import Conv
 
+
+def _local_contrast_norm(hmap: torch.Tensor) -> torch.Tensor:
+    """Per-image min-max normalisation — stretch each heatmap to fill [0, 1].
+
+    Preserves pixel ranking (auroc-invariant) while expanding the value range
+    so the detection head sees anomaly peaks near 1.0 and background near 0.0,
+    matching the distribution it was trained on from memory-bank heatmaps.
+    """
+    h_min = hmap.amin(dim=[2, 3], keepdim=True)
+    h_max = hmap.amax(dim=[2, 3], keepdim=True)
+    return (hmap - h_min) / (h_max - h_min + 1e-8)
+
+
 __all__ = (
     "BboxMaskRenderer",
     "HeatmapBiasFusion",
@@ -1586,6 +1599,7 @@ class FeatureInversionDecoder(nn.Module):
         hmap = hmap.clamp(0, 1)
         if getattr(self, "_gamma", 1.0) != 1.0:
             hmap = hmap.pow(self._gamma)
+        hmap = _local_contrast_norm(hmap)
         return hmap
 
     def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:
@@ -1861,6 +1875,7 @@ class UNetFeatureDecoder(nn.Module):
         hmap = hmap.clamp(0, 1)
         if getattr(self, "_gamma", 1.0) != 1.0:
             hmap = hmap.pow(self._gamma)
+        hmap = _local_contrast_norm(hmap)
         return hmap
 
     def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:
@@ -2146,6 +2161,7 @@ class DiffusionFeatureDecoder(nn.Module):
         hmap = hmap.clamp(0, 1)
         if getattr(self, "_gamma", 1.0) != 1.0:
             hmap = hmap.pow(self._gamma)
+        hmap = _local_contrast_norm(hmap)
         return hmap
 
     def fit(self, normal_feats: dict[int, torch.Tensor]) -> None:

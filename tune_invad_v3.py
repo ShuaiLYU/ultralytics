@@ -48,13 +48,13 @@ ROOT = Path("/data/shared-datasets/louis_data/MVTec-YOLO/MVTec-YOLO")
 IMGSZ = 640
 CATS = ["bottle", "cable", "screw", "zipper", "toothbrush"]
 
-# Verified on ultra6 (2026-07-02)
+# Verified on ultra6 (2026-07-02 13:00 UTC) — bank heatmap mode, default v2_cfg
 BANK_BASELINE = {
-    "bottle":     {"mAP10": 0.8087, "mAP25": 0.6408, "mAP50": 0.1929},
-    "cable":      {"mAP10": 0.3599, "mAP25": 0.2543, "mAP50": 0.0591},
-    "screw":      {"mAP10": 0.3273, "mAP25": 0.0830, "mAP50": 0.0143},
-    "zipper":     {"mAP10": 0.9555, "mAP25": 0.9196, "mAP50": 0.5203},
-    "toothbrush": {"mAP10": 0.5251, "mAP25": 0.2581, "mAP50": 0.1012},
+    "bottle":     {"mAP10": 0.6405, "mAP25": 0.6036, "mAP50": 0.1275},
+    "cable":      {"mAP10": 0.5000, "mAP25": 0.1921, "mAP50": 0.0252},
+    "screw":      {"mAP10": 0.0409, "mAP25": 0.0114, "mAP50": 0.0028},
+    "zipper":     {"mAP10": 0.5628, "mAP25": 0.3975, "mAP50": 0.1463},
+    "toothbrush": {"mAP10": 0.1993, "mAP25": 0.1264, "mAP50": 0.0817},
 }
 
 BB_LAYERS = [6]

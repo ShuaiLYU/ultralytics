@@ -1697,21 +1697,21 @@ class _FiLMBlock(nn.Module):
             ng = min(32, out_ch)
             if out_ch % ng != 0:
                 ng = 16 if out_ch % 16 == 0 else 8
-            self.norm = nn.GroupNorm(ng, out_ch) if in_ch == out_ch else nn.GroupNorm(ng, out_ch)
+            self.norm = nn.GroupNorm(ng, out_ch)
         elif norm_type == "batch":
-            self.norm = nn.BatchNorm2d(out_ch) if in_ch == out_ch else nn.BatchNorm2d(out_ch)
+            self.norm = nn.BatchNorm2d(out_ch)
         else:
-            self.norm = nn.InstanceNorm2d(out_ch, affine=True) if in_ch == out_ch else nn.Identity()
-        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+            self.norm = nn.InstanceNorm2d(out_ch, affine=True)
+        self.conv1 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
         self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
         self.film = nn.Conv2d(cond_ch, out_ch * 2, 1)
         self.act = nn.GELU()
         self._proj = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        x = self._proj(x)  # match in_ch → out_ch
         x = self.act(self.conv1(x))
-        x = self._proj(x) if isinstance(self._proj, nn.Conv2d) else x
-        x_norm = self.norm(x) if not isinstance(self.norm, nn.Identity) else x
+        x_norm = self.norm(x)
         gamma, beta = self.film(cond).chunk(2, dim=1)
         x = gamma * x_norm + beta
         return self.act(self.conv2(x))

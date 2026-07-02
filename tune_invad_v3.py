@@ -48,13 +48,14 @@ ROOT = Path("/data/shared-datasets/louis_data/MVTec-YOLO/MVTec-YOLO")
 IMGSZ = 640
 CATS = ["bottle", "cable", "screw", "zipper", "toothbrush"]
 
-# Verified on ultra6 (2026-07-02 13:00 UTC) — bank heatmap mode, default v2_cfg
+# Verified on ultra6 (2026-07-02) with run_yoloa.py --mode val --prior heatmap
+# using yoloa_fit_default.yaml: K=5, temp=5.0, calibration_target=0.4
 BANK_BASELINE = {
-    "bottle":     {"mAP10": 0.6405, "mAP25": 0.6036, "mAP50": 0.1275},
-    "cable":      {"mAP10": 0.5000, "mAP25": 0.1921, "mAP50": 0.0252},
-    "screw":      {"mAP10": 0.0409, "mAP25": 0.0114, "mAP50": 0.0028},
-    "zipper":     {"mAP10": 0.5628, "mAP25": 0.3975, "mAP50": 0.1463},
-    "toothbrush": {"mAP10": 0.1993, "mAP25": 0.1264, "mAP50": 0.0817},
+    "bottle":     {"mAP10": 0.8092, "mAP25": 0.6410, "mAP50": 0.1930, "im_auroc": 0.9543, "px_auroc": 0.9166},
+    "cable":      {"mAP10": 0.3601, "mAP25": 0.2546, "mAP50": 0.0588, "im_auroc": 0.9185, "px_auroc": 0.9232},
+    "screw":      {"mAP10": 0.3289, "mAP25": 0.0836, "mAP50": 0.0144, "im_auroc": 0.8623, "px_auroc": 0.9372},
+    "zipper":     {"mAP10": 0.9556, "mAP25": 0.9196, "mAP50": 0.5203, "im_auroc": 0.9842, "px_auroc": 0.9192},
+    "toothbrush": {"mAP10": 0.5266, "mAP25": 0.2585, "mAP50": 0.1012, "im_auroc": 1.0000, "px_auroc": 0.9482},
 }
 
 BB_LAYERS = [6]
@@ -179,7 +180,9 @@ fieldnames = ["category", "config", "arch", "loss_mode", "lr", "steps",
               "bank_mAP10", "invad_mAP10", "delta_mAP10",
               "bank_mAP25", "invad_mAP25", "delta_mAP25",
               "bank_mAP50", "invad_mAP50", "delta_mAP50",
-              "invad_im_auroc", "invad_px_auroc", "gamma"]
+              "bank_im_auroc", "invad_im_auroc", "delta_im_auroc",
+              "bank_px_auroc", "invad_px_auroc", "delta_px_auroc",
+              "gamma"]
 if not OUT_CSV.exists():
     with open(OUT_CSV, "w", newline="") as f:
         csv.DictWriter(f, fieldnames=fieldnames).writeheader()
@@ -237,8 +240,10 @@ for cfg_name, kw in my_configs:
                 "delta_mAP25": round(d["mAP25"] - b["mAP25"], 4),
                 "bank_mAP50": b["mAP50"], "invad_mAP50": round(d["mAP50"], 4),
                 "delta_mAP50": round(d["mAP50"] - b["mAP50"], 4),
-                "invad_im_auroc": round(d["image_auroc"], 4),
-                "invad_px_auroc": round(d["pixel_auroc"], 4),
+                "bank_im_auroc": b["im_auroc"], "invad_im_auroc": round(d["image_auroc"], 4),
+                "delta_im_auroc": round(d["image_auroc"] - b["im_auroc"], 4),
+                "bank_px_auroc": b["px_auroc"], "invad_px_auroc": round(d["pixel_auroc"], 4),
+                "delta_px_auroc": round(d["pixel_auroc"] - b["px_auroc"], 4),
                 "gamma": round(gamma, 4),
             }
             cat_results[cat] = row
@@ -258,8 +263,11 @@ for cfg_name, kw in my_configs:
 
     if cat_results:
         avgs = {k: round(float(np.mean([r[k] for r in cat_results.values()])), 4)
-                for k in ["invad_mAP10", "delta_mAP10", "invad_mAP25", "delta_mAP25"]}
-        avg_b = round(float(np.mean([BANK_BASELINE[c]["mAP10"] for c in CATS])), 4)
-        log(f"  AVG: mAP10={avgs['invad_mAP10']} (Δ{avgs['delta_mAP10']:+.4f}) vs bank={avg_b}")
+                for k in ["invad_mAP10", "delta_mAP10", "invad_im_auroc", "delta_im_auroc",
+                          "invad_px_auroc", "delta_px_auroc"]}
+        avg_b_m = round(float(np.mean([BANK_BASELINE[c]["mAP10"] for c in CATS])), 4)
+        avg_b_im = round(float(np.mean([BANK_BASELINE[c]["im_auroc"] for c in CATS])), 4)
+        log(f"  AVG: mAP10={avgs['invad_mAP10']} (Δ{avgs['delta_mAP10']:+.4f}) vs bank_mAP10={avg_b_m}  "
+            f"im_auc={avgs['invad_im_auroc']} (Δ{avgs['delta_im_auroc']:+.4f}) vs bank_im={avg_b_im}")
 
 log(f"\nDONE — {len(rows)} rows saved to {OUT_CSV}")

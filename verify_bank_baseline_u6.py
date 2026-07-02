@@ -16,7 +16,8 @@ DEVICE = "cuda:0"
 IMGSZ = 640
 CATS = ["bottle", "cable", "screw", "zipper", "toothbrush"]
 
-ROOT = resolve_mvtec_root(None)
+ROOT = Path("/data/shared-datasets/louis_data/MVTec-YOLO/MVTec-YOLO")
+# node: MVTec on ultra6 is nested one extra level due to rsync
 print(f"ultra6 bank baseline | device={DEVICE} | cats={CATS}", flush=True)
 print(f"ckpt: {CKPT}", flush=True)
 print(f"mvtec_root: {ROOT}", flush=True)

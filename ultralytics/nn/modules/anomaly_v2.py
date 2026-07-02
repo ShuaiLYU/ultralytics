@@ -1982,7 +1982,7 @@ class _DiffUNet(nn.Module):
             nn.ConvTranspose2d(chs[-1 - i], chs[-2 - i], 2, stride=2) for i in range(num_levels)
         ])
         self.dec_blocks = nn.ModuleList([
-            _FiLMBlock(chs[-2 - i] * 2, chs[-2 - i], cond_ch) for i in range(num_levels)
+            _FiLMBlock(chs[-2 - i] + chs[-1 - i], chs[-2 - i], cond_ch) for i in range(num_levels)
         ])
 
         # Time projection (injected at bottleneck)

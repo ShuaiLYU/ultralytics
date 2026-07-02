@@ -2108,20 +2108,22 @@ class DiffusionFeatureDecoder(nn.Module):
                 cond = F.interpolate(cond, size=(h, w), mode="bilinear", align_corners=False)
 
             # DDIM steps: leap from T to 0 in num_infer_steps
-            step_size = self.num_diff_steps // self.num_infer_steps
+            step_size = max(1, self.num_diff_steps // self.num_infer_steps)
             ts = list(range(self.num_diff_steps - 1, -1, -step_size))
+            if ts[-1] != 0:
+                ts.append(0)  # always denoise to t=0 for a clean x0
             xt = torch.randn(b, self.encoder_chs[i], h, w, device=enc_feat.device)
             for j, ts_val in enumerate(ts):
                 t = torch.full((b,), ts_val, device=enc_feat.device, dtype=torch.long)
                 eps_pred = self.unet(xt, t, cond)
+                alpha_bar_t = self.alpha_bar[ts_val]
+                # Tweedie's formula: estimate clean x0 from noisy xt
+                pred_x0 = (xt - (1 - alpha_bar_t).sqrt() * eps_pred) / alpha_bar_t.sqrt().clamp(min=1e-8)
                 if j < len(ts) - 1:
                     t_next = ts[j + 1]
-                    alpha_bar_t = self.alpha_bar[ts_val]
                     alpha_bar_next = self.alpha_bar[t_next] if t_next >= 0 else torch.tensor(1.0, device=xt.device)
-                    # DDIM update
-                    pred_x0 = (xt - (1 - alpha_bar_t).sqrt() * eps_pred) / alpha_bar_t.sqrt().clamp(min=1e-8)
                     xt = alpha_bar_next.sqrt() * pred_x0 + (1 - alpha_bar_next).sqrt() * eps_pred
-            out[layer_idx] = xt
+            out[layer_idx] = pred_x0.clamp(-10, 10)
         return out
 
     def anomaly_map(self, feat_dict: dict[int, torch.Tensor]) -> torch.Tensor:

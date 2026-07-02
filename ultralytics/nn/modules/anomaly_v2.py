@@ -1684,12 +1684,6 @@ class FeatureInversionDecoder(nn.Module):
                     n_pix += enc.shape[2] * enc.shape[3] * enc.shape[0]
                 amap_sum += msum.item()
                 amap_n += n_pix
-            raw_mean = amap_sum / max(amap_n, 1)
-            TARGET = 0.37  # bank normal baseline
-            import math
-            gamma = math.log(TARGET) / max(math.log(max(raw_mean, 1e-6)), math.log(1e-6))
-            self._gamma = float(max(0.15, min(0.8, gamma)))
-
         self._fitted = True
 
 
@@ -1937,12 +1931,6 @@ class UNetFeatureDecoder(nn.Module):
                     n_pix += enc.shape[2] * enc.shape[3] * enc.shape[0]
                 amap_sum += msum.item()
                 amap_n += n_pix
-            raw_mean = amap_sum / max(amap_n, 1)
-            TARGET = 0.37
-            import math
-            gamma = math.log(TARGET) / max(math.log(max(raw_mean, 1e-6)), math.log(1e-6))
-            self._gamma = float(max(0.15, min(0.8, gamma)))
-
         self._fitted = True
 
 
@@ -2220,12 +2208,6 @@ class DiffusionFeatureDecoder(nn.Module):
                     n_pix += enc.shape[2] * enc.shape[3] * enc.shape[0]
                 amap_sum += msum.item()
                 amap_n += n_pix
-            raw_mean = amap_sum / max(amap_n, 1)
-            TARGET = 0.37
-            import math
-            gamma = math.log(TARGET) / max(math.log(max(raw_mean, 1e-6)), math.log(1e-6))
-            self._gamma = float(max(0.15, min(0.8, gamma)))
-
         self._fitted = True
 
 

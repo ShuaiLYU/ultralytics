@@ -131,10 +131,12 @@ if not OUT_CSV.exists():
         csv.DictWriter(f, fieldnames=fieldnames).writeheader()
 
 for cfg_name, kw in my_configs:
-    if cfg_name in done:
+    cfg_cats_done = sum(1 for cat in CATS if f"{cfg_name}_{cat}" in done)
+    if cfg_cats_done == len(CATS):
+        log(f"\n--- {cfg_name} [SKIP: all done] ---")
         continue
 
-    log(f"\n--- {cfg_name} {kw} ---")
+    log(f"\n--- {cfg_name} ({cfg_cats_done}/{len(CATS)} done) {kw} ---")
 
     for cat in CATS:
         key = f"{cfg_name}_{cat}"
@@ -191,8 +193,5 @@ for cfg_name, kw in my_configs:
             log(f"  FAILED: {e}")
             traceback.print_exc()
             continue
-
-    done.add(cfg_name)
-    OUT_PROG.write_text(json.dumps({"done": list(done)}))
 
 log(f"\nDONE — {OUT_CSV}")

@@ -1473,7 +1473,7 @@ def _inject_synthetic_anomalies(
         mode = modes[torch.randint(0, len(modes), (1,), generator=generator).item()]
 
         if mode == "gaussian_noise":
-            noise = torch.randn(C, H, W, generator=generator, device=feats.device) * noise_std
+            noise = (torch.randn(C, H, W, generator=generator) * noise_std).to(feats.device)
             corrupted[idx_item] = corrupted[idx_item] + noise
             anomaly_mask[idx_item] = 1.0
 

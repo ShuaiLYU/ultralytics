@@ -1435,6 +1435,75 @@ class _SSMBlock(nn.Module):
         return shortcut + x if self.use_residual else x
 
 
+def _inject_synthetic_anomalies(
+    feats: torch.Tensor,
+    anomaly_ratio: float,
+    modes: list[str],
+    generator: torch.Generator,
+    noise_std: float = 0.1,
+    patch_size_ratio: float = 0.2,
+    channel_drop_ratio: float = 0.3,
+    shift_max: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Inject synthetic anomalies into spatial features for anomaly-aware training.
+
+    Args:
+        feats: ``(B, C, H, W)`` clean normal features.
+        anomaly_ratio: Fraction of batch items to corrupt (0.0 = disabled).
+        modes: List of strategies to randomly choose from per corrupted item.
+        generator: CPU ``torch.Generator`` for deterministic sampling.
+        noise_std: Std for ``gaussian_noise`` mode.
+        patch_size_ratio: Patch size as fraction of H, W for ``cutpaste`` mode.
+        channel_drop_ratio: Fraction of channels to zero out for ``channel_dropout``.
+        shift_max: Max pixel shift for ``spatial_shift`` mode.
+
+    Returns:
+        ``(corrupted_feats, anomaly_mask)`` where ``corrupted_feats`` has the same
+        shape as input and ``anomaly_mask`` is ``(B, 1, H, W)`` binary (1 = corrupted).
+    """
+    B, C, H, W = feats.shape
+    n_corrupt = max(1, int(B * anomaly_ratio))
+    corrupt_idx = torch.randperm(B, generator=generator)[:n_corrupt]
+
+    corrupted = feats.clone()
+    anomaly_mask = torch.zeros(B, 1, H, W, device=feats.device, dtype=torch.float32)
+
+    for idx in corrupt_idx:
+        idx_item = idx.item()
+        mode = modes[torch.randint(0, len(modes), (1,), generator=generator).item()]
+
+        if mode == "gaussian_noise":
+            noise = torch.randn(C, H, W, generator=generator, device=feats.device) * noise_std
+            corrupted[idx_item] = corrupted[idx_item] + noise
+            anomaly_mask[idx_item] = 1.0
+
+        elif mode == "cutpaste":
+            ph = max(1, int(H * patch_size_ratio))
+            pw = max(1, int(W * patch_size_ratio))
+            src_y = torch.randint(0, H - ph + 1, (1,), generator=generator).item()
+            src_x = torch.randint(0, W - pw + 1, (1,), generator=generator).item()
+            src_idx = torch.randint(0, B, (1,), generator=generator).item()
+            patch = corrupted[src_idx, :, src_y:src_y + ph, src_x:src_x + pw].clone()
+            dst_y = torch.randint(0, H - ph + 1, (1,), generator=generator).item()
+            dst_x = torch.randint(0, W - pw + 1, (1,), generator=generator).item()
+            corrupted[idx_item, :, dst_y:dst_y + ph, dst_x:dst_x + pw] = patch
+            anomaly_mask[idx_item, 0, dst_y:dst_y + ph, dst_x:dst_x + pw] = 1.0
+
+        elif mode == "channel_dropout":
+            n_drop = max(1, int(C * channel_drop_ratio))
+            drop_chs = torch.randperm(C, generator=generator)[:n_drop]
+            corrupted[idx_item, drop_chs] = 0.0
+            anomaly_mask[idx_item] = 1.0
+
+        elif mode == "spatial_shift":
+            dy = torch.randint(-shift_max, shift_max + 1, (1,), generator=generator).item()
+            dx = torch.randint(-shift_max, shift_max + 1, (1,), generator=generator).item()
+            corrupted[idx_item] = torch.roll(corrupted[idx_item], shifts=(dy, dx), dims=(1, 2))
+            anomaly_mask[idx_item] = 1.0
+
+    return corrupted, anomaly_mask
+
+
 class FeatureInversionDecoder(nn.Module):
     """InvAD-style feature inversion decoder for anomaly detection.
 
@@ -1476,6 +1545,11 @@ class FeatureInversionDecoder(nn.Module):
         loss_mode: str = "mse",
         residual_mode: str = "block",
         norm_type: str = "instance",
+        anomaly_ratio: float = 0.0,
+        anomaly_lambda: float = 0.5,
+        anomaly_margin: float = 0.3,
+        anomaly_modes: list[str] | None = None,
+        anomaly_noise_std: float = 0.1,
     ):
         super().__init__()
         self.encoder_chs = list(encoder_chs)
@@ -1489,6 +1563,11 @@ class FeatureInversionDecoder(nn.Module):
         self.loss_mode = str(loss_mode)
         self.residual_mode = str(residual_mode)
         self.norm_type = str(norm_type)
+        self.anomaly_ratio = float(anomaly_ratio)
+        self.anomaly_lambda = float(anomaly_lambda)
+        self.anomaly_margin = float(anomaly_margin)
+        self.anomaly_modes = list(anomaly_modes) if anomaly_modes else ["gaussian_noise", "cutpaste"]
+        self.anomaly_noise_std = float(anomaly_noise_std)
         self._fitted = False
 
         # -- Per-scale style translators (bottleneck: enc_ch → 2*style_ch → 2*decoder_ch) --
@@ -1666,7 +1745,26 @@ class FeatureInversionDecoder(nn.Module):
                     if j < len(scale_feats):
                         mb_feats[layer_idx] = scale_feats[j][idx]
 
-                recon = self.forward(mb_feats)
+                # -- Synthetic anomaly injection (if enabled) --
+                anomaly_mask: torch.Tensor | None = None
+                mb_feats_corrupt: dict[int, torch.Tensor] = {}
+                if self.anomaly_ratio > 0:
+                    for layer_idx, enc in mb_feats.items():
+                        c_feats, a_mask = _inject_synthetic_anomalies(
+                            enc,
+                            anomaly_ratio=self.anomaly_ratio,
+                            modes=self.anomaly_modes,
+                            generator=g,
+                            noise_std=self.anomaly_noise_std,
+                        )
+                        mb_feats_corrupt[layer_idx] = c_feats
+                        if anomaly_mask is None:
+                            anomaly_mask = a_mask  # (B, 1, H, W), shared across layers
+                    style_input = mb_feats_corrupt
+                else:
+                    style_input = mb_feats
+
+                recon = self.forward(style_input)
                 loss = torch.tensor(0.0, device=dev)
                 for layer_idx, enc in mb_feats.items():
                     if layer_idx not in recon:
@@ -1675,15 +1773,29 @@ class FeatureInversionDecoder(nn.Module):
                     if self.loss_mode == "cosine":
                         enc_n = F.normalize(enc, p=2, dim=1)
                         dec_n = F.normalize(dec, p=2, dim=1)
-                        loss = loss + (1.0 - (enc_n * dec_n).sum(dim=1)).mean()
+                        cos_sim = (enc_n * dec_n).sum(dim=1, keepdim=True)  # (B, 1, H, W)
+                        loss = loss + (1.0 - cos_sim).mean()
+                        if anomaly_mask is not None and self.anomaly_lambda > 0:
+                            cos_anom = (cos_sim * anomaly_mask).sum() / anomaly_mask.sum().clamp(min=1)
+                            margin_cos = 1.0 - self.anomaly_margin
+                            loss = loss + self.anomaly_lambda * F.relu(cos_anom - margin_cos)
                     elif self.loss_mode == "mse+cosine":
                         loss_mse = F.mse_loss(dec, enc)
                         enc_n = F.normalize(enc, p=2, dim=1)
                         dec_n = F.normalize(dec, p=2, dim=1)
-                        loss_cos = (1.0 - (enc_n * dec_n).sum(dim=1)).mean()
+                        cos_sim = (enc_n * dec_n).sum(dim=1, keepdim=True)
+                        loss_cos = (1.0 - cos_sim).mean()
                         loss = loss + loss_mse + loss_cos
+                        if anomaly_mask is not None and self.anomaly_lambda > 0:
+                            anom_err = (dec - enc).pow(2).mean(dim=1, keepdim=True)  # (B, 1, H, W)
+                            anom_mse = (anom_err * anomaly_mask).sum() / anomaly_mask.sum().clamp(min=1)
+                            loss = loss + self.anomaly_lambda * F.relu(self.anomaly_margin - anom_mse)
                     else:  # mse
                         loss = loss + F.mse_loss(dec, enc)
+                        if anomaly_mask is not None and self.anomaly_lambda > 0:
+                            anom_err = (dec - enc).pow(2).mean(dim=1, keepdim=True)
+                            anom_mse = (anom_err * anomaly_mask).sum() / anomaly_mask.sum().clamp(min=1)
+                            loss = loss + self.anomaly_lambda * F.relu(self.anomaly_margin - anom_mse)
 
                 opt.zero_grad()
                 loss.backward()

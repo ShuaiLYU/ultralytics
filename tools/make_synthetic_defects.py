@@ -145,7 +145,8 @@ def saliency_classical(img):
 
 
 _U2NET = None
-U2NET_ONNX = str(Path.home() / ".u2net" / "u2netp.onnx")  # 4.4MB lite salient-object net
+_U2NET_LOCAL = Path(__file__).parent / "u2netp.onnx"
+U2NET_ONNX = str(_U2NET_LOCAL if _U2NET_LOCAL.exists() else Path.home() / ".u2net" / "u2netp.onnx")
 
 
 def saliency_u2net(img):
@@ -260,7 +261,7 @@ def color_jitter(patch, rng):
 class DefectMaker:
     """Composite one synthetic defect onto a normal image; return (image, bbox)."""
 
-    def __init__(self, seed=0, area_range=(0.005, 0.08), aspect_range=(0.3, 3.3),
+    def __init__(self, seed=0, area_range=(0.02, 0.25), aspect_range=(0.3, 3.3),
                  blend_weights=(0.35, 0.35, 0.30)):
         self.rng = np.random.default_rng(seed)
         self.area_range = area_range
@@ -418,7 +419,14 @@ def _overlay(img, mask, color=(0, 200, 255), a=0.45):
 
 
 def stain_demo():
-    """Compare poisson vs alpha vs stain blend on MVTec, same geometry per row."""
+    """Compare poisson vs alpha vs stain blend on MVTec, U2Net saliency for objects.
+
+    Object categories (bottle, metal_nut, screw, etc.): defects constrained to the
+    product surface via U2Netp saliency. Texture categories (carpet, leather, etc.):
+    no constraint — the whole image is the surface.
+    """
+    # MVTec categories split by type
+    TEXTURE_CATS = {"carpet", "grid", "leather", "tile", "wood"}
     cats = ["bottle", "carpet", "hazelnut", "wood", "transistor", "leather", "tile", "screw",
             "capsule", "metal_nut", "pill", "toothbrush", "cable", "grid"]
     rng = np.random.default_rng(0)
@@ -428,15 +436,17 @@ def stain_demo():
         good = sorted((MVTEC / cat / "train" / "good").glob("*.png"))
         if not good:
             continue
+        is_texture = cat in TEXTURE_CATS
         cell_rows = []
         for sample_idx in range(2):
-            # -- shared geometry: one maker, snapshot rng before blend --
             img = cv2.imread(str(good[int(rng.integers(0, len(good)))]))
             img = cv2.resize(img, (256, 256))
             donor = cv2.imread(str(good[int(rng.integers(0, len(good)))]))
             donor = cv2.resize(donor, (256, 256))
             H, W = img.shape[:2]
-            x, y, rw, rh = maker._region(H, W, None)
+            # U2Net saliency for object categories; no fg for texture
+            fg = None if is_texture else foreground_mask(img, method="u2net")
+            x, y, rw, rh = maker._region(H, W, fg)
             shape = maker.rng.choice(list(SHAPE_FNS))
             local_mask = SHAPE_FNS[shape](rh, rw, maker.rng)
             if donor is not None and maker.rng.random() < 0.7:
@@ -445,12 +455,15 @@ def stain_demo():
                 fill_ = noise_fill(rh, rw, maker.rng)
             full_mask = np.zeros((H, W), np.uint8)
             full_mask[y:y + rh, x:x + rw] = local_mask
+            if fg is not None:
+                kf = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, (min(H, W) // 50) | 1),) * 2)
+                full_mask = cv2.bitwise_and(full_mask, cv2.dilate(fg, kf))
             if full_mask.max() == 0:
                 continue
             full_fill = img.copy()
             full_fill[y:y + rh, x:x + rw] = fill_
             beta = maker.rng.uniform(0.6, 1.0)
-            rng_state = maker.rng.bit_generator.state  # snapshot
+            rng_state = maker.rng.bit_generator.state
             # -- blend all three ways from the same state --
             def _blend_one(mode, label):
                 maker.rng.bit_generator.state = rng_state
@@ -461,12 +474,16 @@ def stain_demo():
                 cv2.putText(out, label, (5, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
                 return out
             cells = []
-            cells.append(img)
+            # Show saliency overlay column for object categories
+            if is_texture:
+                cells.append(img)
+            else:
+                sal_vis = cv2.applyColorMap(fg, cv2.COLORMAP_JET) if fg is not None else img.copy()
+                cells.append(sal_vis)
             cells.append(_blend_one("poisson", "poisson"))
             cells.append(_blend_one("alpha", "alpha"))
             cells.append(_blend_one("stain", "stain"))
             cell_rows.append(np.hstack(cells))
-        # Stack the two samples vertically per category
         rows.append(np.vstack(cell_rows))
     grid = np.vstack(rows)
     label_w = 80

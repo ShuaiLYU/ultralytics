@@ -260,10 +260,12 @@ def color_jitter(patch, rng):
 class DefectMaker:
     """Composite one synthetic defect onto a normal image; return (image, bbox)."""
 
-    def __init__(self, seed=0, area_range=(0.005, 0.08), aspect_range=(0.3, 3.3)):
+    def __init__(self, seed=0, area_range=(0.005, 0.08), aspect_range=(0.3, 3.3),
+                 blend_weights=(0.35, 0.35, 0.30)):
         self.rng = np.random.default_rng(seed)
         self.area_range = area_range
         self.aspect_range = aspect_range
+        self.blend_weights = blend_weights  # (poisson, alpha, stain)
 
     def _region(self, H, W, fg=None):
         """Pick a defect region box (x, y, w, h) by area ratio + aspect.
@@ -309,26 +311,72 @@ class DefectMaker:
         full_fill[y : y + rh, x : x + rw] = fill
 
         beta = self.rng.uniform(0.6, 1.0)  # opacity of the defect
-        use_poisson = shape != "scar" and self.rng.random() < 0.5
-        out = self._blend(image, full_fill, full_mask, beta, use_poisson)
+        blend_mode = self._pick_blend(shape)
+        out = self._blend(image, full_fill, full_mask, beta, blend_mode)
 
         ys, xs = np.where(full_mask > 0)
         bbox = (xs.min(), ys.min(), xs.max() + 1, ys.max() + 1)  # x1,y1,x2,y2
         return out, bbox
 
-    def _blend(self, image, fill, mask, beta, use_poisson):
-        if use_poisson:
+    def _pick_blend(self, shape):
+        """Choose blend mode by weights; scar always uses alpha (no Poisson clone)."""
+        w_poisson, w_alpha, w_stain = self.blend_weights
+        total = w_poisson + w_alpha + w_stain
+        r = self.rng.random() * total
+        if shape == "scar":
+            return "alpha"
+        if r < w_poisson:
+            return "poisson"
+        if r < w_poisson + w_alpha:
+            return "alpha"
+        return "stain"
+
+    def _blend(self, image, fill, mask, beta, mode):
+        if mode == "stain":
+            return self._blend_stain(image, fill, mask, beta)
+        if mode == "poisson":
             x, y, w, h = cv2.boundingRect(mask)
             center = (x + w // 2, y + h // 2)
             try:
                 return cv2.seamlessClone(fill, image, mask, center, cv2.NORMAL_CLONE)
             except cv2.error:
                 pass
-        # feathered alpha blend
+        # feathered alpha blend (default)
         k = max(3, (min(image.shape[:2]) // 60) | 1)
         soft = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (k, k), 0) * beta
         soft = soft[..., None]
         return (image * (1 - soft) + fill * soft).astype(np.uint8)
+
+    def _blend_stain(self, image, fill, mask, beta):
+        """Color-only blend: shift chroma (a*/b* in LAB) toward fill, preserve texture.
+
+        The original surface structure (L channel ~ luminance/grain) is largely kept;
+        only the color impression shifts toward the fill's hue. This models real-world
+        stains / discoloration: the material texture stays visible, the color changes.
+        """
+        k = max(3, (min(image.shape[:2]) // 60) | 1)
+        soft = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (k, k), 0) * beta
+        soft = soft[..., None]
+
+        img_lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+        fill_lab = cv2.cvtColor(fill, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        # The fill pixel at the mask centroid sets the target stain color
+        ys, xs = np.where(mask > 0)
+        cy, cx = int(ys.mean()), int(xs.mean())
+        target = fill_lab[cy, cx]
+
+        stain_lab = img_lab.copy()
+        # ab channels: shift toward fill chroma (strength = random, heavier ab shift)
+        ab_str = self.rng.uniform(0.4, 0.9)
+        stain_lab[..., 1] = img_lab[..., 1] * (1 - ab_str) + target[1] * ab_str
+        stain_lab[..., 2] = img_lab[..., 2] * (1 - ab_str) + target[2] * ab_str
+        # L channel: gentle shift — texture lives here
+        l_str = self.rng.uniform(0.1, 0.5)
+        stain_lab[..., 0] = img_lab[..., 0] * (1 - l_str) + target[0] * l_str
+
+        stain_bgr = cv2.cvtColor(stain_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+        return (image * (1 - soft) + stain_bgr * soft).astype(np.uint8)
 
 
 # --------------------------------------------------------------------------- #
@@ -367,6 +415,70 @@ def _overlay(img, mask, color=(0, 200, 255), a=0.45):
     sel = mask > 0
     out[sel] = out[sel] * (1 - a) + np.array(color, np.float32) * a
     return out.astype(np.uint8)
+
+
+def stain_demo():
+    """Compare poisson vs alpha vs stain blend on MVTec, same geometry per row."""
+    cats = ["bottle", "carpet", "hazelnut", "wood", "transistor", "leather", "tile", "screw",
+            "capsule", "metal_nut", "pill", "toothbrush", "cable", "grid"]
+    rng = np.random.default_rng(0)
+    maker = DefectMaker(seed=1)
+    rows = []
+    for cat in cats:
+        good = sorted((MVTEC / cat / "train" / "good").glob("*.png"))
+        if not good:
+            continue
+        cell_rows = []
+        for sample_idx in range(2):
+            # -- shared geometry: one maker, snapshot rng before blend --
+            img = cv2.imread(str(good[int(rng.integers(0, len(good)))]))
+            img = cv2.resize(img, (256, 256))
+            donor = cv2.imread(str(good[int(rng.integers(0, len(good)))]))
+            donor = cv2.resize(donor, (256, 256))
+            H, W = img.shape[:2]
+            x, y, rw, rh = maker._region(H, W, None)
+            shape = maker.rng.choice(list(SHAPE_FNS))
+            local_mask = SHAPE_FNS[shape](rh, rw, maker.rng)
+            if donor is not None and maker.rng.random() < 0.7:
+                fill_ = color_jitter(cutpaste_fill(rh, rw, maker.rng, donor), maker.rng)
+            else:
+                fill_ = noise_fill(rh, rw, maker.rng)
+            full_mask = np.zeros((H, W), np.uint8)
+            full_mask[y:y + rh, x:x + rw] = local_mask
+            if full_mask.max() == 0:
+                continue
+            full_fill = img.copy()
+            full_fill[y:y + rh, x:x + rw] = fill_
+            beta = maker.rng.uniform(0.6, 1.0)
+            rng_state = maker.rng.bit_generator.state  # snapshot
+            # -- blend all three ways from the same state --
+            def _blend_one(mode, label):
+                maker.rng.bit_generator.state = rng_state
+                out = maker._blend(img, full_fill, full_mask, beta, mode)
+                ys, xs = np.where(full_mask > 0)
+                x1, y1_, x2, y2_ = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+                cv2.rectangle(out, (x1, y1_), (x2, y2_), (0, 0, 255), 2)
+                cv2.putText(out, label, (5, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                return out
+            cells = []
+            cells.append(img)
+            cells.append(_blend_one("poisson", "poisson"))
+            cells.append(_blend_one("alpha", "alpha"))
+            cells.append(_blend_one("stain", "stain"))
+            cell_rows.append(np.hstack(cells))
+        # Stack the two samples vertically per category
+        rows.append(np.vstack(cell_rows))
+    grid = np.vstack(rows)
+    label_w = 80
+    labeled = np.zeros((grid.shape[0], grid.shape[1] + label_w, 3), np.uint8)
+    labeled[:, label_w:] = grid
+    rh = grid.shape[0] // len(cats)
+    for i, cat in enumerate(cats):
+        cy = rh * i + rh // 2
+        cv2.putText(labeled, cat, (2, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+    out_path = Path(__file__).parent / "synthetic_defect_stain_demo.jpg"
+    cv2.imwrite(str(out_path), labeled)
+    print(f"wrote {out_path}  ({labeled.shape[1]}x{labeled.shape[0]})")
 
 
 def v5_demo(method="classical"):
@@ -485,7 +597,8 @@ def generate(args):
     out = Path(args.out)
     (out / "images").mkdir(parents=True, exist_ok=True)
     (out / "labels").mkdir(parents=True, exist_ok=True)
-    maker = DefectMaker(seed=args.seed)
+    bw = args.blend_weights
+    maker = DefectMaker(seed=args.seed, blend_weights=bw)
     rng = np.random.default_rng(args.seed)
     n_done = tries = 0
     while n_done < args.n and tries < args.n * 5:
@@ -515,6 +628,7 @@ def generate(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smoke", action="store_true", help="run local MVTec viz smoke test")
+    ap.add_argument("--stain-demo", action="store_true", help="compare poisson/alpha/stain blends side-by-side on MVTec")
     ap.add_argument("--v5demo", action="store_true", help="run viz on the pulled v5 good-image sample")
     ap.add_argument("--gallery", action="store_true", help="render labeled per-source contact sheet")
     ap.add_argument("--no-fg", action="store_true", help="disable foreground constraint (place anywhere)")
@@ -525,9 +639,17 @@ def main():
     ap.add_argument("--n", type=int, default=30000, help="number of synthetic images")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tag", default="", help="filename prefix tag (use distinct tags for parallel shards)")
+    ap.add_argument("--blend-weights", type=float, nargs=3, default=[0.35, 0.35, 0.30],
+                    metavar=("W_POISSON", "W_ALPHA", "W_STAIN"),
+                    help="blend mode probabilities (poisson alpha stain)")
+    ap.add_argument("--stain-only", action="store_true", help="force all blends to stain mode")
     args = ap.parse_args()
+    if args.stain_only:
+        args.blend_weights = (0.0, 0.0, 1.0)
     if args.smoke:
         smoke()
+    elif args.stain_demo:
+        stain_demo()
     elif args.gallery:
         gallery()
     elif args.v5demo:

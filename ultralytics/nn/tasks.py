@@ -571,43 +571,18 @@ class YOLOAnomalyV2Model(DetectionModel):
         self.p_drop = float(v2_cfg.get("p_drop", 0.5))
         # Polygon-mask prior: disabled; bbox-rendered gauss prior is used.
         self.seg_target_polygon = False
-        # Fusion mechanism: 'bias' (HeatmapBiasFusion, 1-channel additive), 'soft'
-        # (HeatmapSoftFusion, temperature-softmax + BN → bias), 'film'
-        # (HeatmapFiLMFusion, global residual grouped-FiLM), or 'queryfilm'
-        # (QueryFiLMFusion, K learned queries). Exactly one is instantiated.
+        # Fusion mechanism: 'bias' (HeatmapBiasFusion, 1-channel additive).
         fusion_mode = str(v2_cfg.get("fusion_mode", "bias")).lower()
         if fusion_mode != "bias":
             raise ValueError(f"fusion_mode must be bias, got {fusion_mode!r}")
         fusion_mid = int(v2_cfg.get("fusion_mid", 8))
         fusion_norm = bool(v2_cfg.get("fusion_norm", False))
         fusion_residual = bool(v2_cfg.get("fusion_residual", False))
-        # Direction B (feature-conditioned fusion) + direction A (per-scale conv).
-        #   fusion_feat      -- fusion also reads the PAN feature it biases (concat proj + mask).
-        #   fusion_feat_k    -- width of the per-scale C_i -> k feature projection.
-        #   fusion_per_scale -- unshare the conv across P3/P4/P5.
-        #   fusion_depth     -- N extra hidden 3x3 convs (c_mid width) in each block; 0 = original.
-        #   fusion_feat_grad -- if True, the feature-input path back-props into the backbone;
-        #                       if False (default), the feature is detached so the fusion reads
-        #                       the trunk but does not reshape it (keeps the trunk prior-clean).
-        #                       Only has effect when fusion_feat is on.
-        fusion_feat = bool(v2_cfg.get("fusion_feat", False))
-        fusion_feat_k = int(v2_cfg.get("fusion_feat_k", 8))
         fusion_per_scale = bool(v2_cfg.get("fusion_per_scale", False))
         fusion_depth = int(v2_cfg.get("fusion_depth", 0))
-        self.fusion_feat = fusion_feat
-        self.fusion_feat_grad = bool(v2_cfg.get("fusion_feat_grad", False))
-        # Prior injection target: 'all' adds the bias to the PAN features (box + cls branches both
-        # see it); 'cls' hands the bias to the Detect head, which applies it to the cls-branch
-        # input only. Rationale: the training prior is rendered FROM the GT bbox, so a box branch
-        # that sees it can learn to read defect extent off the prior — an oracle that a deploy-time
-        # memory-bank blob cannot honor. The cls branch only needs the prior's location, which
-        # transfers. 'all_clsgrad' = all-mode FORWARD (both branches see the bias, deploy graph
-        # identical to 'all') but the fusion module receives gradients from the cls path only —
-        # isolates whether the extent-oracle lives in fusion shaping or in box-weight adaptation.
-        fusion_target = str(v2_cfg.get("fusion_target", "all")).lower()
-        if fusion_target not in ("all", "cls", "all_clsgrad"):
-            raise ValueError(f"fusion_target must be 'all', 'cls' or 'all_clsgrad', got {fusion_target!r}")
-        self.fusion_target = fusion_target
+        # Bias is injected at the Concat outputs (before C3k2), so both box and cls
+        # branches see it — equivalent to the old fusion_target='all' behaviour.
+        self.fusion_target = "all"
 
         # AnomalyMCDetect (decoupled binary detection + multi-class type head):
         #   type_gain -- weight of the type cross-entropy in the loss (read by AnomalyMCLoss).
@@ -635,13 +610,9 @@ class YOLOAnomalyV2Model(DetectionModel):
         self.mask_size = mask_size
 
         self.mask_augmenter = MaskPriorAugmenter(v2_cfg)
-        # Per-scale PAN channel counts (C3, C4, C5) recovered from the Detect box head — needed
-        # by the feature-conditioned projection. cv2[i][0] is the first Conv of scale i's box head.
-        pan_ch = [detect.cv2[i][0].conv.in_channels for i in range(detect.nl)] if fusion_feat else None
         self.heatmap_bias_fusion = HeatmapBiasFusion(
             c_mid=fusion_mid, inst_norm=fusion_norm, residual=fusion_residual,
-            ch=pan_ch, feat=fusion_feat, k_feat=fusion_feat_k, per_scale=fusion_per_scale,
-            depth=fusion_depth)
+            per_scale=fusion_per_scale, depth=fusion_depth)
         # Heatmap gate blend on the Detect head (0=full gate, 1=off).
         self.hm_gate_blend = float(v2_cfg.get("hm_gate_blend", 1.0))
         # Inference-time prior processing: minmax stretch, gaussian/mean blur, spatial softmax,
@@ -696,15 +667,12 @@ class YOLOAnomalyV2Model(DetectionModel):
     # YAML knobs that define the HeatmapBiasFusion FORMAT (module structure / forward semantics).
     # fusion_load requires the donor and the current model to agree on ALL of these. Note that
     # fusion_norm / fusion_residual add no parameters, so a state-dict compare alone would miss
-    # them — they still change what the weights mean. fusion_lr_scale / fusion_target /
-    # fusion_feat_grad are caller-side (optimizer / gradient routing) and deliberately excluded.
+    # them — they still change what the weights mean.
     _FUSION_FORMAT_KEYS = {
         "fusion_mode": "bias",
         "fusion_mid": 8,
         "fusion_norm": False,
         "fusion_residual": False,
-        "fusion_feat": False,
-        "fusion_feat_k": 8,
         "fusion_per_scale": False,
         "fusion_depth": 0,
     }
@@ -740,6 +708,15 @@ class YOLOAnomalyV2Model(DetectionModel):
         # Format check 2: state-dict keys + shapes (catches donors older than the knobs above).
         donor_sd = donor_fusion.state_dict()
         cur_sd = self.heatmap_bias_fusion.state_dict()
+        # Backward compat: old fusion_feat checkpoints carry feat_proj.* weights that no
+        # longer exist — strip them with a warning so older donors can still be loaded.
+        _stale = [k for k in donor_sd if k.startswith("feat_proj.")]
+        if _stale:
+            LOGGER.warning(
+                f"anomaly_v2.fusion_load: stripping {len(_stale)} deprecated feat_proj key(s) "
+                f"from donor — fusion_feat is no longer supported."
+            )
+            donor_sd = {k: v for k, v in donor_sd.items() if not k.startswith("feat_proj.")}
         missing = sorted(cur_sd.keys() - donor_sd.keys())
         unexpected = sorted(donor_sd.keys() - cur_sd.keys())
         shape_diff = [
@@ -1268,8 +1245,23 @@ class YOLOAnomalyV2Model(DetectionModel):
         if bboxes is not None and external_mask is None and self.training and p_drop > 0.0:
             keep = (torch.rand(batch_size, device=device) > p_drop).to(keep.dtype)
 
-        # The fusion prior is resolved inside the loop once the PAN features are available.
+        # Resolve the prior source early (lightweight, just picks a string). Non-heatmap
+        # priors are built upfront; the heatmap prior is resolved lazily on first inject
+        # (backbone hooks populate _bb_feats during the forward, available by layer 11+).
+        source = self._select_prior_source(external_mask, mask_disabled, bboxes, batch_masks)
         prior = None
+        _prior_done = False
+        if source not in (None, "none", "heatmap"):
+            prior = self._resolve_prior(
+                source,
+                bboxes=bboxes, batch_idx=batch_idx, batch_masks=batch_masks,
+                external_mask=external_mask, batch_size=batch_size, device=device,
+                augment=self.training,
+            )
+            _prior_done = True
+
+        # Concat layer index → PAN scale index (P3, N4, N5).
+        _INJECT = {15: 0, 18: 1, 21: 2}
 
         y, dt, embeddings = [], [], []
         embed = frozenset(embed) if embed is not None else {-1}
@@ -1277,100 +1269,58 @@ class YOLOAnomalyV2Model(DetectionModel):
         last = self.model[-1]
         for m in self.model:
             if m is last:
-                # Apply soft-hint fusion to the PAN inputs before Detect.
-                # m.f is a list of indices into y (the PAN P3/P4/P5 outputs).
+                # Bias already injected at Concat outputs (15/18/21); C3k2 processed it.
                 pan_inputs = [y[j] for j in m.f]
-
-                # Resolve the fusion prior from a single source (picker + unified resolver).
-                source = self._select_prior_source(external_mask, mask_disabled, bboxes, batch_masks)
-                prior = self._resolve_prior(
-                    source,
-                    bboxes=bboxes,
-                    batch_idx=batch_idx,
-                    batch_masks=batch_masks,
-                    external_mask=external_mask,
-                    batch_size=batch_size,
-                    device=device,
-                    augment=self.training,
-                )
-                # Edge-suppression weight: down-weight the memory-bank heatmap toward the image
-                # borders (peripheral patches score high from boundary effects, not real defects).
-                if (
-                    prior is not None
-                    and source == "heatmap"
-                    and getattr(self, "heatmap_edge_weight", False)
-                ):
-                    prior = prior * self._edge_weight(prior)
-                # Stash RAW heatmap for validator AUROC (before softmax/augmentation).
-                self._last_heatmap = prior.detach() if prior is not None else None
-                # Per-image min-max normalization: stretch each sample's prior to [0, 1].
-                # Boosts a soft, low-peak prior (memory bank ~0.8) so the fusion conv responds
-                # like it did to binary GT masks. NOTE: on clean images with a flat prior this
-                # amplifies noise to full range -> may induce false positives.
-                _hn = getattr(self, "heatmap_norm", "none")
-                if prior is not None and _hn == "minmax":
-                    b = prior.shape[0]
-                    flat = prior.reshape(b, -1)
-                    lo = flat.min(dim=1, keepdim=True).values
-                    hi = flat.max(dim=1, keepdim=True).values
-                    prior = ((flat - lo) / (hi - lo).clamp_min(1e-6)).reshape_as(prior)
-                elif prior is not None and _hn in ("gaussian", "mean"):
-                    # Blur the prior: keeps [0,1] scale + blob structure (unlike softmax),
-                    # denoising the MB heatmap toward the gauss masks the fusion trained on.
-                    prior = self._smooth_prior(prior, _hn, getattr(self, "heatmap_smooth_kernel", 5))
-                # NOTE: training-time prior augmentation (_augment_mask) is applied once inside
-                # _resolve_prior (augment=self.training); do not re-apply it here.
-                fused = []
-                # fusion_target='cls': PAN features stay clean; the per-scale deltas go to the
-                # Detect head as ``hm_bias`` and are added to the cls-branch input only.
-                # fusion_target='all_clsgrad' (training only): both branches see the bias, but the
-                # fusion module gets gradients from the cls path alone — box input carries
-                # delta.detach(), and the head's cls_x adds back (delta - delta.detach()), which is
-                # zero-valued yet grad-carrying. In eval it reduces to plain 'all'.
-                _ft = getattr(self, "fusion_target", "all")
-                cls_only = _ft == "cls"
-                clsgrad = _ft == "all_clsgrad" and self.training
-                hm_bias = [] if (cls_only or clsgrad) and prior is not None else None
-                for i, p in enumerate(pan_inputs):
-                    if prior is None:
-                        # Pure passthrough: skip fusion entirely.
-                        fused.append(p)
-                        continue
-                    # QueryFiLM (v0) modulates P3 (i == 0) only; P4/P5 pass through unchanged.
-                    target_h, target_w = p.shape[2], p.shape[3]
-                    if prior.shape[2] != target_h or prior.shape[3] != target_w:
-                        m_scale = torch.nn.functional.interpolate(
-                            prior, size=(target_h, target_w), mode="bilinear", align_corners=False
-                        )
-                    else:
-                        m_scale = prior
-                    # Feature-conditioned mode: hand the fusion the PAN feature it is biasing.
-                    # fusion_feat_grad gates whether that path reaches the backbone (detach if not).
-                    if getattr(self, "fusion_feat", False):
-                        feat_in = p if getattr(self, "fusion_feat_grad", False) else p.detach()
-                        delta = self.heatmap_bias_fusion(m_scale, i, feat=feat_in)
-                    else:
-                        delta = self.heatmap_bias_fusion(m_scale, i)
-                    # Per-sample keep mask (mask dropout): dropped samples get zero increment.
-                    delta = delta * keep.to(delta.dtype).view(-1, 1, 1, 1)
-                    if hm_bias is not None and clsgrad:
-                        fused.append(p + delta.detach())
-                        hm_bias.append(delta - delta.detach())
-                    elif hm_bias is not None:
-                        fused.append(p)
-                        hm_bias.append(delta)
-                    else:
-                        fused.append(p + delta)
-                _supports_hm = hasattr(m, "_build_heatmap_gate")
-                if hm_bias is not None and not _supports_hm:
-                    raise RuntimeError("fusion_target='cls' requires a Detect head that accepts hm_bias")
-                x = m(fused, heatmap=prior, hm_bias=hm_bias) if _supports_hm else m(fused)
+                x = m(pan_inputs, heatmap=prior)
             else:
                 if m.f != -1:
                     x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
                 if profile:
                     self._profile_one_layer(m, x, dt)
                 x = m(x)
+
+                # Inject heatmap bias after Concat layers 15/18/21 (before the next C3k2).
+                if m.i in _INJECT:
+                    if not _prior_done:
+                        prior = self._resolve_prior(
+                            source,
+                            bboxes=bboxes, batch_idx=batch_idx, batch_masks=batch_masks,
+                            external_mask=external_mask, batch_size=batch_size, device=device,
+                            augment=self.training,
+                        )
+                        # Edge-suppression weight for memory-bank heatmaps.
+                        if (
+                            prior is not None
+                            and source == "heatmap"
+                            and getattr(self, "heatmap_edge_weight", False)
+                        ):
+                            prior = prior * self._edge_weight(prior)
+                        # Stash raw heatmap for validator AUROC.
+                        self._last_heatmap = prior.detach() if prior is not None else None
+                        # Per-image min-max normalization.
+                        _hn = getattr(self, "heatmap_norm", "none")
+                        if prior is not None and _hn == "minmax":
+                            b_ = prior.shape[0]
+                            flat = prior.reshape(b_, -1)
+                            lo = flat.min(dim=1, keepdim=True).values
+                            hi = flat.max(dim=1, keepdim=True).values
+                            prior = ((flat - lo) / (hi - lo).clamp_min(1e-6)).reshape_as(prior)
+                        elif prior is not None and _hn in ("gaussian", "mean"):
+                            prior = self._smooth_prior(prior, _hn, getattr(self, "heatmap_smooth_kernel", 5))
+                        _prior_done = True
+
+                    if prior is not None:
+                        scale_idx = _INJECT[m.i]
+                        target_h, target_w = x.shape[2], x.shape[3]
+                        if prior.shape[2] != target_h or prior.shape[3] != target_w:
+                            m_scale = torch.nn.functional.interpolate(
+                                prior, size=(target_h, target_w), mode="bilinear", align_corners=False
+                            )
+                        else:
+                            m_scale = prior
+                        delta = self.heatmap_bias_fusion(m_scale, scale_idx)
+                        delta = delta * keep.to(delta.dtype).view(-1, 1, 1, 1)
+                        x = x + delta
             y.append(x if m.i in self.save else None)
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)

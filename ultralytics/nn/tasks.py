@@ -675,7 +675,9 @@ class YOLOAnomalyV2Model(DetectionModel):
         # Architecture knob from the model YAML; all build hyperparameters come from the fit YAML.
         bb_layers_cfg = v2_cfg.get("bb_layers", None)
         bb_layers = list(bb_layers_cfg) if bb_layers_cfg else None
-        self.memory_bank = BackboneMemoryBank(**self._BANK_DEFAULTS) if bb_layers else None
+        bb_spatial = bool(v2_cfg.get("bb_spatial", False))
+        bank_kwargs = dict(self._BANK_DEFAULTS, spatial=bb_spatial)
+        self.memory_bank = BackboneMemoryBank(**bank_kwargs) if bb_layers else None
         self._bb_layers = bb_layers
         self._bb_hook_handles: list = []
         self._bb_feats: dict[int, "torch.Tensor"] = {}
@@ -692,7 +694,11 @@ class YOLOAnomalyV2Model(DetectionModel):
         """``True`` when a calibrated memory bank is loaded and ready for scoring."""
         if self.memory_bank is None:
             return False
-        return self.memory_bank.memory_bank is not None and self.memory_bank.memory_bank.shape[0] > 0
+        mb = self.memory_bank
+        if mb.spatial:
+            sizes = getattr(mb, "_spatial_bank_sizes", None)
+            return sizes is not None and (sizes > 0).any()
+        return mb.memory_bank is not None and mb.memory_bank.shape[0] > 0
 
     def init_criterion(self):
         """Initialize the loss criterion.
@@ -925,13 +931,17 @@ class YOLOAnomalyV2Model(DetectionModel):
             n_ingested += len(chunk)
 
         mb.freeze_memory_bank()
-        final_size = mb.memory_bank.shape[0]
+        if mb.spatial:
+            final_size = int(mb._spatial_bank_sizes.sum().item()) if mb._spatial_bank_sizes is not None else 0
+        else:
+            final_size = mb.memory_bank.shape[0]
         if verbose:
             LOGGER.info(
                 f"Memory bank frozen: {final_size} features, dim={mb.feature_dim}\n"
                 f"  config: temp={mb.temperature:.4f}, K={mb.K}, "
                 f"max_bank={mb.max_bank_size or 'unlimited'}, holdout_max={mb.holdout_max}, "
                 f"bb_layers={self._bb_layers}"
+                f"{f', spatial=({mb._spatial_H}x{mb._spatial_W})' if mb.spatial else ''}"
             )
         return final_size
 

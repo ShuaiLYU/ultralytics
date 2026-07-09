@@ -1,0 +1,24 @@
+# YOLOA fit config — spatial memory bank variant.
+# bb_spatial=true: per-position coresets, strict per-position scoring.
+# Inherits all other defaults from yoloa_fit_default.yaml.
+
+# -- Feature extraction (backbone tap) ----------------------------------
+imgsz: 640
+bb_layers: [6]
+
+# -- Bank-build knobs ---------------------------------------------------
+max_images: 0
+bb_max_bank_size: 10000
+bb_holdout_max: 5000
+bb_K: 5
+bb_temperature: 5.0
+bb_calibration_target_score: 0.4
+bb_calibration_target_quantile: 0.95
+bb_spatial: true            # per-position memory bank (ONNX-friendly)
+
+# -- Heatmap post-processing (inference only) ---------------------------
+bb_hmap_stretch_strength: 0.
+heat_edge: true
+heat_edge_sigma: 1.0
+heat_norm: none
+hm_gate_blend: 1.0

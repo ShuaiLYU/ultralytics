@@ -51,6 +51,7 @@ FIT_KEYS = (
     "bb_calibration_target_quantile",
     "bb_hmap_stretch_strength",
     "bb_holdout_max",
+    "bb_spatial",
 )
 
 # fit-key -> BackboneMemoryBank attribute it sets (bb_layers handled separately: it re-taps).
@@ -62,6 +63,7 @@ _BB_TO_MB = {
     "bb_calibration_target_quantile": "calibration_target_quantile",
     "bb_hmap_stretch_strength": "hmap_stretch_strength",
     "bb_holdout_max": "holdout_max",
+    "bb_spatial": "spatial",
 }
 
 
@@ -171,14 +173,25 @@ class YOLOA(Model):
             d = torch.load(cache_path, map_location="cpu")
             if not d.get("_calibrated"):
                 LOGGER.warning(f"bank cache is old format (no calibration state); delete {cache_path} to rebuild")
-            mb.load_bank(d["memory_bank"])
+            if mb.spatial:
+                spatial_data = d["memory_bank"]
+                mb.load_bank(spatial_data)
+            else:
+                mb.load_bank(d["memory_bank"])
             mb.temperature = d["temperature"]
             mb.update = False
             if d.get("_calibrated"):
-                mb._threshold = d["_threshold"]
-                mb._compactness = d["_compactness"]
-                mb._calibrated = True
-            LOGGER.info(f"YOLOA.fit: loaded cached bank ({mb.memory_bank.shape[0]} vecs) <- {cache_path}")
+                if mb.spatial:
+                    mb._spatial_comp_stacked = d["_compactness_arr"]
+                    mb._spatial_thresh_stacked = d["_threshold_arr"]
+                    mb._calibrated = True
+                else:
+                    mb._threshold = d["_threshold"]
+                    mb._compactness = d["_compactness"]
+                    mb._calibrated = True
+            n_vecs = (int((mb._spatial_bank_sizes > 0).sum().item())
+                      ) if mb.spatial else mb.memory_bank.shape[0]
+            LOGGER.info(f"YOLOA.fit: loaded cached bank ({n_vecs} vecs) <- {cache_path}")
         else:
             n = m.load_support_set(
                 data,
@@ -191,17 +204,32 @@ class YOLOA(Model):
             )
             if cache_path is not None and n:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
-                entry = {
-                    "memory_bank": mb.memory_bank.detach().cpu(),
-                    "feature_dim": mb.feature_dim,
-                    "temperature": float(mb.temperature),
-                }
-                if getattr(mb, "_calibrated", False):
-                    entry["_threshold"] = mb._threshold
-                    entry["_compactness"] = mb._compactness
+                if mb.spatial:
+                    entry = {"memory_bank": {
+                        "bank_stacked": mb._spatial_bank_stacked.detach().cpu(),
+                        "bank_sizes": mb._spatial_bank_sizes.cpu(),
+                        "comp": mb._spatial_comp_stacked.cpu(),
+                        "thresh": mb._spatial_thresh_stacked.cpu(),
+                        "feature_dim": mb.feature_dim,
+                        "temperature": float(mb.temperature),
+                        "H": mb._spatial_H,
+                        "W": mb._spatial_W,
+                    }, "feature_dim": mb.feature_dim, "temperature": float(mb.temperature)}
+                    entry["_threshold_arr"] = mb._spatial_thresh_stacked.cpu()
+                    entry["_compactness_arr"] = mb._spatial_comp_stacked.cpu()
                     entry["_calibrated"] = True
+                else:
+                    entry = {
+                        "memory_bank": mb.memory_bank.detach().cpu(),
+                        "feature_dim": mb.feature_dim,
+                        "temperature": float(mb.temperature),
+                    }
+                    if getattr(mb, "_calibrated", False):
+                        entry["_threshold"] = mb._threshold
+                        entry["_compactness"] = mb._compactness
+                        entry["_calibrated"] = True
                 torch.save(entry, cache_path)
-                LOGGER.info(f"YOLOA.fit: cached bank ({mb.memory_bank.shape[0]} vecs) -> {cache_path}")
+                LOGGER.info(f"YOLOA.fit: cached bank ({n} vecs) -> {cache_path}")
 
         m.fit_args = dict(fit_args)  # provenance — plain attrs, ride along on save()
         m.fit_data = data_name

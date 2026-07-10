@@ -858,9 +858,14 @@ class YOLOAnomalyV2Model(DetectionModel):
         Iterates over images, runs the backbone to extract features, accumulates them
         into the memory bank, then compresses and freezes the bank.
 
+        Images are letterboxed to a square ``imgsz`` with the official ``LetterBox``
+        (aspect preserved, centred 114-gray padding) — the SAME geometry val/predict
+        use with ``rect=False``, so bank positions line up with query positions on
+        non-square images too.
+
         Args:
             source: Directory of normal images or list of image paths.
-            imgsz: Resize images to this square size.
+            imgsz: Letterbox images to this square size.
             device: Device for the bank (defaults to model device).
             batch: Mini-batch size for backbone feature extraction.
             max_bank_size: Maximum bank entries (coreset subsampling at freeze).
@@ -872,6 +877,7 @@ class YOLOAnomalyV2Model(DetectionModel):
         import cv2
         from pathlib import Path
 
+        from ultralytics.data.augment import LetterBox
         from ultralytics.utils import LOGGER, TQDM
 
         mb = getattr(self, "memory_bank", None)
@@ -906,6 +912,7 @@ class YOLOAnomalyV2Model(DetectionModel):
         if verbose:
             LOGGER.info(f"Building memory bank from {len(paths)} images (imgsz={imgsz})...")
 
+        letterbox = LetterBox((imgsz, imgsz), auto=False)  # same geometry as val/predict with rect=False
         pbar = TQDM(paths, desc="Building memory bank") if verbose else paths
         chunk = []
         n_ingested = 0  # track total images ingested for delayed temp display
@@ -914,7 +921,7 @@ class YOLOAnomalyV2Model(DetectionModel):
             if img is None:
                 continue
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = cv2.resize(img, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
+            img = letterbox(image=img)
             chunk.append(img)
             if len(chunk) >= batch:
                 self._ingest_support_batch(chunk, device, mb)

@@ -54,6 +54,11 @@ FIT_KEYS = (
     "bb_spatial",
 )
 
+# Bank-build preprocessing version — part of the fit identity (cache key). Bump when the
+# load_support_set image pipeline changes geometry/values ("letterbox-v1" = official LetterBox,
+# square, aspect-preserving, 114-gray pad — matches val/predict with rect=False).
+_PREPROC_TAG = "letterbox-v1"
+
 # fit-key -> BackboneMemoryBank attribute it sets (bb_layers handled separately: it re-taps).
 _BB_TO_MB = {
     "bb_max_bank_size": "max_bank_size",
@@ -275,8 +280,10 @@ class YOLOA(Model):
 
     @staticmethod
     def _fit_hash(fit_args: dict) -> str:
-        """8-char hash of the resolved fit config (imgsz + bank knobs) — the fit identity."""
-        blob = json.dumps({k: fit_args.get(k) for k in FIT_KEYS}, sort_keys=True, default=str)
+        """8-char hash of the resolved fit config (imgsz + bank knobs + preproc version) — the fit identity."""
+        blob = json.dumps(
+            {**{k: fit_args.get(k) for k in FIT_KEYS}, "preproc": _PREPROC_TAG}, sort_keys=True, default=str
+        )
         return hashlib.md5(blob.encode()).hexdigest()[:8]
 
     @staticmethod

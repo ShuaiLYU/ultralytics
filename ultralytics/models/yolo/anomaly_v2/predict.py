@@ -37,6 +37,10 @@ class YOLOAnomalyPredictorBase:
 
     def preprocess(self, im):
         """Set prior mode and optional mask on the model before forward."""
+        if self.prior_mode == "heatmap" and getattr(self.args, "rect", False):
+            # Memory-bank geometry is a square letterbox (load_support_set); force the same
+            # geometry on queries so bank positions line up. Mirrors the validator's rect=False.
+            self.args.rect = False
         m = resolve_v2_model(self.model)
         if m is not None and hasattr(m, "set_prior_mode"):
             m.set_prior_mode(self.prior_mode)

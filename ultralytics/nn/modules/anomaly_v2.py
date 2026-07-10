@@ -257,23 +257,26 @@ def _sincos_pos2d(h: int, w: int, dim: int, device, dtype) -> torch.Tensor:
 class BackboneMemoryBank(nn.Module):
     """Memory-bank anomaly heatmap from backbone features (v1 ADMBHead inference logic).
 
-    Stores L2-normalised normal-image backbone features. During inference, scores
-    each spatial position via Noisy-OR cosine similarity against the bank, producing a
-    (B, 1, H, W) heatmap that feeds into HeatmapBiasFusion as a prior.
+    Stores L2-normalised normal-image features in a single position-stacked format
+    ``bank_stacked [P, C, max_n]`` scored by one batched matmul (ONNX exports as a
+    single MatMul node — no per-position loop):
+
+      - global bank (``spatial=False``): P = 1 — every query position is scored
+        against the same pooled bank, at the query's native resolution.
+      - per-position bank (``spatial=True``): P = H*W — each query position is
+        scored only against its own (h, w) sub-bank, at the bank's resolution.
+
+    The flat/global bank is just the P=1 special case: storage, cache format,
+    scoring kernel and all call-site checks are shared between the two modes.
 
     Two modes controlled by ``update``:
       - ``True`` (build): ``forward()`` returns zeros — bank not yet frozen.
       - ``False`` (inference): ``forward()`` returns anomaly scores in [0, 1].
 
-    Calibration modes (``calibrate`` parameter):
-
-      - ``"auto"`` (default): sample from the full accumulated bank and calibrate β
-        so that the 90th-percentile normal feature scores ``calibration_target_score``.
-        Coreset is skipped in this mode.
-      - ``"compactness"``: first subsample via greedy k-centre coreset, then measure
-        local neighbour density (compactness) on the coreset to calibrate β.
-        Scores naturally map to [0, 1] because compactness reflects the true normal
-        manifold tightness.
+    Calibration measures compactness (mean local cosine density) on a flat coreset
+    and tunes β/threshold from a holdout so the normal-score tail sits at
+    ``calibration_target_score``; per-position mode calibrates once on the pooled
+    bank and broadcasts the scalars into ``bank_thresh``.
     """
 
     def __init__(
@@ -297,29 +300,36 @@ class BackboneMemoryBank(nn.Module):
         self.holdout_max = int(holdout_max)
         self.spatial = bool(spatial)
         self._calibrated = False
-        self.register_buffer("memory_bank", torch.empty(0, 0), persistent=True)
         self.feature_dim: int | None = None
         self.update = True
         self._bb_layer_indices: list[int] = []
-        self._bank_chunks: list[torch.Tensor] = []
         self._compactness: float | None = None  # normal-manifold tightness from coreset
-        self._threshold: float | None = None  # sigmoid threshold in d_norm space
-        self.score_chunk_elems = 1 << 27  # max elements per similarity slice in _anomaly_scores
-        # Spatial mode: per-position sub-banks (build-time) and frozen stacked bank (inference)
-        self._spatial_H: int = 0
-        self._spatial_W: int = 0
-        self._spatial_bank_chunks: list = []  # list[H*W] of list[torch.Tensor] chunks, build-time
-        self.register_buffer("_spatial_bank_stacked", torch.empty(0, 0, 0), persistent=True)
-        self.register_buffer("_spatial_bank_sizes", torch.empty(0, dtype=torch.long), persistent=True)
-        self.register_buffer("_spatial_comp_stacked", torch.empty(0), persistent=True)
-        self.register_buffer("_spatial_thresh_stacked", torch.empty(0), persistent=True)
+        self._threshold: float | None = None  # sigmoid threshold in cosine space
+        self.score_chunk_elems = 1 << 27  # max elements per similarity slice in _score_stacked
+        # Unified bank storage — the global/flat bank is the P=1 case.
+        self._bank_H: int = 0  # 0 = global bank (score at query resolution)
+        self._bank_W: int = 0
+        self._build_chunks: list[torch.Tensor] = []  # [B, H, W, C] normalised, build-time only
+        self.register_buffer("bank_stacked", torch.empty(0, 0, 0), persistent=True)  # [P, C, max_n]
+        self.register_buffer("bank_sizes", torch.empty(0, dtype=torch.long), persistent=True)  # [P]
+        self.register_buffer("bank_thresh", torch.empty(0), persistent=True)  # [P], NaN = recompute lazily
 
     @property
     def built(self) -> bool:
         return not self.update
 
+    @property
+    def bank_built(self) -> bool:
+        """``True`` when a frozen bank with at least one feature vector is loaded."""
+        return self.bank_sizes.numel() > 0 and bool((self.bank_sizes > 0).any())
+
+    @property
+    def num_features(self) -> int:
+        """Total feature vectors across all positions."""
+        return int(self.bank_sizes.sum().item()) if self.bank_sizes.numel() else 0
+
     def __setstate__(self, state):
-        """Backfill attributes added after the checkpoint was saved."""
+        """Backfill attributes added after the checkpoint was saved and migrate legacy bank formats."""
         super().__setstate__(state)
         # Drop deprecated projection state from old checkpoints.
         if "proj_dim" in self.__dict__:
@@ -338,124 +348,187 @@ class BackboneMemoryBank(nn.Module):
             self.holdout_max = 5000
         if not hasattr(self, "spatial"):
             self.spatial = False
-        if not hasattr(self, "_spatial_H"):
-            self._spatial_H = 0
-            self._spatial_W = 0
-        if not hasattr(self, "_spatial_bank_chunks"):
-            self._spatial_bank_chunks = []
-        for buf in ("_spatial_bank_stacked", "_spatial_bank_sizes",
-                     "_spatial_comp_stacked", "_spatial_thresh_stacked"):
-            if buf not in self._buffers:
-                self.register_buffer(buf, torch.empty(0), persistent=True)
-
-    def _apply(self, fn, recurse=True):
-        """Keep a plain-attribute memory bank in sync with ``.to()``/``.float()``/``.half()``.
-
-        If ``memory_bank`` is ever held as a plain attribute (not a registered buffer), it is
-        skipped by ``nn.Module._apply`` and would stay on the old device/dtype after
-        ``model.to(device)``; this defensively moves it. A no-op for the registered-buffer case.
-        """
-        module = super()._apply(fn, recurse)
-        if "memory_bank" not in module._buffers and isinstance(module.memory_bank, torch.Tensor):
-            module.memory_bank = fn(module.memory_bank)
-        return module
+        if not hasattr(self, "_bank_H"):
+            self._bank_H = 0
+            self._bank_W = 0
+        if not hasattr(self, "_build_chunks"):
+            self._build_chunks = []
+        if "bank_stacked" not in self._buffers:
+            self.register_buffer("bank_stacked", torch.empty(0, 0, 0), persistent=True)
+        if "bank_sizes" not in self._buffers:
+            self.register_buffer("bank_sizes", torch.empty(0, dtype=torch.long), persistent=True)
+        if "bank_thresh" not in self._buffers:
+            self.register_buffer("bank_thresh", torch.empty(0), persistent=True)
+        # Migrate the legacy per-position format (transient dev format, pre-unification).
+        legacy_stacked = self._buffers.pop("_spatial_bank_stacked", None)
+        legacy_sizes = self._buffers.pop("_spatial_bank_sizes", None)
+        legacy_thresh = self._buffers.pop("_spatial_thresh_stacked", None)
+        self._buffers.pop("_spatial_comp_stacked", None)
+        legacy_h = self.__dict__.pop("_spatial_H", 0)
+        legacy_w = self.__dict__.pop("_spatial_W", 0)
+        self.__dict__.pop("_spatial_bank_chunks", None)
+        self.__dict__.pop("_bank_chunks", None)
+        if legacy_stacked is not None and legacy_stacked.numel() and not self.bank_stacked.numel():
+            self.bank_stacked = legacy_stacked
+            self.bank_sizes = legacy_sizes.long()
+            P = legacy_stacked.shape[0]
+            has_thresh = legacy_thresh is not None and legacy_thresh.numel() == P
+            self.bank_thresh = legacy_thresh if has_thresh else torch.full((P,), float("nan"))
+            self._bank_H, self._bank_W = int(legacy_h), int(legacy_w)
+        # Migrate the legacy flat format ([M, C] buffer).
+        legacy_flat = self._buffers.pop("memory_bank", None)
+        if legacy_flat is not None and legacy_flat.numel() and not self.bank_stacked.numel():
+            valid = legacy_flat[legacy_flat.norm(dim=1) > 0]  # strip zero-padding placeholders
+            if valid.shape[0] > 0:
+                self.feature_dim = valid.shape[1]
+                self._store_global(valid)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def load_bank(self, data: torch.Tensor | dict) -> None:
-        """Load a pre-built memory bank (flat or spatial).
+        """Load a pre-built memory bank (unified stacked format, or a legacy cache format).
 
-        Flat (``spatial=False``): ``data`` is an L2-normalised ``[M, C]`` tensor.
-        Spatial (``spatial=True``): ``data`` is a dict with keys ``bank_stacked``
-        ``[P, C, max_n]``, ``bank_sizes`` ``[P]``, ``comp`` ``[P]``, ``thresh`` ``[P]``,
-        ``feature_dim``, ``temperature``, ``H``, ``W``.
+        Accepts:
+          - a dict from :meth:`export_state` — ``bank_stacked [P, C, max_n]``, ``bank_sizes [P]``,
+            ``bank_thresh [P]``, ``H`` / ``W`` (0 = global), ``feature_dim``, ``temperature``,
+            calibration scalars;
+          - legacy flat: an L2-normalised ``[M, C]`` tensor, or a cache dict wrapping it under
+            ``"memory_bank"`` (repacked as the P=1 stacked case);
+          - legacy per-position cache dicts (``comp`` / ``thresh`` array keys).
         """
-        if not self.spatial:
-            features = data if isinstance(data, torch.Tensor) else data["memory_bank"]
-            if features.numel() == 0:
+        device = self.bank_stacked.device
+        if isinstance(data, dict) and isinstance(data.get("memory_bank"), dict):
+            # Legacy per-position cache: the outer dict wraps the real payload.
+            data = dict(data["memory_bank"])
+        if isinstance(data, dict) and data.get("bank_stacked") is not None:
+            bank = data["bank_stacked"]
+            if bank.numel() == 0:
                 return
-            if not torch.isfinite(features).all():
-                raise ValueError(f"BackboneMemoryBank.load_bank: features contain NaN/Inf ({features.shape})")
-            self.feature_dim = features.shape[1]
-            self.memory_bank = F.normalize(features.to(self.memory_bank.device), p=2, dim=1)
-            self._calibrated = True  # trigger lazy compactness/threshold recompute on next score
+            self.bank_stacked = bank.to(device)
+            self.bank_sizes = data["bank_sizes"].to(device).long()
+            P = bank.shape[0]
+            thresh = data.get("bank_thresh", data.get("thresh"))
+            has_thresh = thresh is not None and thresh.numel() == P
+            self.bank_thresh = thresh.to(device).reshape(P) if has_thresh else torch.full(
+                (P,), float("nan"), device=device
+            )
+            self._bank_H, self._bank_W = int(data.get("H", 0)), int(data.get("W", 0))
+            self.feature_dim = int(data["feature_dim"])
+            if data.get("temperature") is not None:
+                self.temperature = float(data["temperature"])
+            self._compactness = data.get("_compactness")
+            self._threshold = data.get("_threshold")
+            self._calibrated = bool(data.get("_calibrated", True))
+            self.update = False
+            return
+        # Legacy flat: raw tensor or {"memory_bank": tensor, ...} cache dict.
+        features = data["memory_bank"] if isinstance(data, dict) else data
+        if features is None or features.numel() == 0:
+            return
+        if not torch.isfinite(features).all():
+            raise ValueError(f"BackboneMemoryBank.load_bank: features contain NaN/Inf ({features.shape})")
+        self.feature_dim = features.shape[1]
+        if isinstance(data, dict):
+            if data.get("temperature") is not None:
+                self.temperature = float(data["temperature"])
+            self._threshold = data.get("_threshold")
+            self._compactness = data.get("_compactness")
+        else:
+            self._threshold = None  # trigger lazy compactness/threshold recompute on next score
             self._compactness = None
-            self._threshold = None
-            return
-
-        # Spatial mode
-        if isinstance(data, torch.Tensor):
-            raise TypeError("BackboneMemoryBank.load_bank(spatial=True) expects a dict, got tensor")
-        if data.get("bank_stacked") is None or data["bank_stacked"].numel() == 0:
-            return
-        self.feature_dim = data["feature_dim"]
-        self._spatial_H = data["H"]
-        self._spatial_W = data["W"]
-        self._spatial_bank_stacked = data["bank_stacked"].to(self._spatial_bank_stacked.device)
-        self._spatial_bank_sizes = data["bank_sizes"].to(self._spatial_bank_sizes.device)
-        self._spatial_comp_stacked = data["comp"].to(self._spatial_comp_stacked.device)
-        self._spatial_thresh_stacked = data["thresh"].to(self._spatial_thresh_stacked.device)
         self._calibrated = True
+        self._store_global(F.normalize(features.to(device), p=2, dim=1))
+        self.update = False
+
+    def export_state(self) -> dict:
+        """Serializable bank state — the single cache format for both bank modes."""
+        return {
+            "format": "yoloa.bank.stacked.v1",
+            "bank_stacked": self.bank_stacked.detach().cpu(),
+            "bank_sizes": self.bank_sizes.detach().cpu(),
+            "bank_thresh": self.bank_thresh.detach().cpu(),
+            "H": self._bank_H,
+            "W": self._bank_W,
+            "feature_dim": self.feature_dim,
+            "temperature": float(self.temperature),
+            "_compactness": self._compactness,
+            "_threshold": self._threshold,
+            "_calibrated": bool(self._calibrated),
+        }
+
+    def _store_global(self, mem: torch.Tensor) -> None:
+        """Store a flat [M, C] bank as the P=1 case of the stacked format."""
+        device = self.bank_stacked.device
+        self.bank_stacked = mem.t().unsqueeze(0).contiguous().to(device)  # [1, C, M]
+        self.bank_sizes = torch.tensor([mem.shape[0]], dtype=torch.long, device=device)
+        t = self._threshold
+        self.bank_thresh = torch.full((1,), float(t) if t is not None else float("nan"), device=device)
+        self._bank_H = self._bank_W = 0
 
     def freeze_memory_bank(self) -> None:
         """Coreset-compress, calibrate via compactness + holdout, then freeze the bank."""
         import logging
+
         if self.spatial:
             self._freeze_spatial()
-            logger = logging.getLogger(__name__)
-            if logger.isEnabledFor(logging.DEBUG):
-                n_pos = int((self._spatial_bank_sizes > 0).sum().item())
-                logger.debug(
-                    "BackboneMemoryBank(spatial): frozen %d/%d positions  "
-                    "max_n=%d  total_vecs=%d",
-                    n_pos, self._spatial_H * self._spatial_W,
-                    int(self._spatial_bank_sizes.max().item()) if self._spatial_bank_sizes.numel() else 0,
-                    int(self._spatial_bank_sizes.sum().item()),
-                )
-            return
+        else:
+            self._freeze_global()
+        self._build_chunks = []
+        self.update = False
+        logger = logging.getLogger(__name__)
+        if logger.isEnabledFor(logging.DEBUG):
+            n_pos = int((self.bank_sizes > 0).sum().item()) if self.bank_sizes.numel() else 0
+            logger.debug(
+                "BackboneMemoryBank: frozen %d position(s)  grid=%dx%d  max_n=%d  total_vecs=%d",
+                n_pos,
+                self._bank_H,
+                self._bank_W,
+                int(self.bank_sizes.max().item()) if self.bank_sizes.numel() else 0,
+                self.num_features,
+            )
 
-        if self._bank_chunks:
-            self.memory_bank = torch.cat(self._bank_chunks, dim=0)
-            self._bank_chunks.clear()
-        mem = self._effective_bank()
-
+    def _freeze_global(self) -> None:
+        """Global-mode freeze: pool all positions, coreset once, store as P=1."""
+        mem = torch.cat([c.reshape(-1, c.shape[-1]) for c in self._build_chunks], dim=0) if self._build_chunks else (
+            self.bank_stacked.new_zeros(0, 0)
+        )
         # Coreset subsample, collect holdout (features not selected into coreset)
         holdout = None
         if self.max_bank_size is not None and mem.shape[0] > self.max_bank_size:
-            self.memory_bank, coreset_idx = self._coreset_subsample(mem, self.max_bank_size, return_indices=True)
+            coreset, coreset_idx = self._coreset_subsample(mem, self.max_bank_size, return_indices=True)
             holdout_mask = torch.ones(mem.shape[0], dtype=torch.bool, device=mem.device)
             holdout_mask[coreset_idx] = False
             holdout = mem[holdout_mask]
-        mem = self._effective_bank()
+            mem = coreset
 
-        if mem.shape[0] > 0:
-            self._calibrate_compactness(mem)
-            if holdout is not None and holdout.shape[0] > 0:
-                if holdout.shape[0] > self.holdout_max:
-                    holdout = holdout[: self.holdout_max]
-                self._calibrate_threshold_from_holdout(holdout, mem)
-
-        self.update = False
+        if mem.shape[0] == 0:
+            return
+        self._calibrate_compactness(mem)
+        if holdout is not None and holdout.shape[0] > 0:
+            if holdout.shape[0] > self.holdout_max:
+                holdout = holdout[: self.holdout_max]
+            self._calibrate_threshold_from_holdout(holdout, mem)
+        self._store_global(mem)
 
     def _freeze_spatial(self) -> None:
-        """Spatial-mode freeze: per-position coreset -> stacked tensors.
+        """Per-position freeze: per-position coreset -> stacked tensors.
 
         Each position gets its own sub-bank capped at ``max_bank_size`` features.
         Calibration uses a flat reference bank built from pooled per-position samples
-        so thresholds match the flat bank's broader normal-distribution view.
+        so thresholds match the global bank's broader normal-distribution view.
         """
         from ultralytics.utils import TQDM
 
-        H, W, C = self._spatial_H, self._spatial_W, self.feature_dim
+        H, W, C = self._bank_H, self._bank_W, self.feature_dim
         P = H * W
-        if P == 0:
-            self.update = False
+        if P == 0 or not self._build_chunks:
             return
+        all_feats = torch.cat(self._build_chunks, dim=0)  # [N, H, W, C]
 
         per_pos_cap = self.max_bank_size  # direct per-position cap
         per_pos_holdout_cap = max(1, (self.holdout_max // P) + 1) if self.holdout_max else 20
-        device = self.memory_bank.device
+        device = all_feats.device
 
         # Phase 1: per-position coresets + collect holdouts for flat calibration
         spatial_banks: list[torch.Tensor | None] = [None] * P
@@ -463,13 +536,11 @@ class BackboneMemoryBank(nn.Module):
 
         pbar = TQDM(total=P, desc="Spatial banks", leave=False)
         for pos in range(P):
-            chunks = self._spatial_bank_chunks[pos]
             pbar.update(1)
-            if not chunks:
-                continue
-
-            raw = torch.cat(chunks, dim=0)  # [N_pos, C]
+            raw = all_feats[:, pos // W, pos % W, :]  # [N_pos, C]
             n_raw = raw.shape[0]
+            if n_raw == 0:
+                continue
 
             if per_pos_cap is not None and n_raw > per_pos_cap:
                 mem, coreset_idx = self._coreset_subsample(
@@ -497,22 +568,15 @@ class BackboneMemoryBank(nn.Module):
                 flat_holdout_parts.append(holdout)
         pbar.close()
 
-        self._spatial_bank_chunks.clear()
-        self._bank_chunks.clear()
-
         if all(b is None for b in spatial_banks):
-            self._spatial_bank_stacked = torch.zeros(P, 0, 0, device=device)
-            self._spatial_bank_sizes = torch.zeros(P, dtype=torch.long, device=device)
-            self._spatial_comp_stacked = torch.zeros(P, device=device)
-            self._spatial_thresh_stacked = torch.zeros(P, device=device)
-            self.update = False
+            self.bank_stacked = torch.zeros(P, 0, 0, device=device)
+            self.bank_sizes = torch.zeros(P, dtype=torch.long, device=device)
+            self.bank_thresh = torch.zeros(P, device=device)
             return
 
         max_n = max((b.shape[0] for b in spatial_banks if b is not None), default=0)
         stacked = torch.zeros(P, C, max_n, device=device)
         sizes = torch.zeros(P, dtype=torch.long, device=device)
-        comp_arr = torch.zeros(P, device=device)
-        thresh_arr = torch.zeros(P, device=device)
 
         # Phase 2: flat reference bank for calibration — pools per-position banks
         # into a single flat bank, calibrates once, then broadcasts to all positions.
@@ -528,9 +592,6 @@ class BackboneMemoryBank(nn.Module):
                 flat_holdout = flat_holdout[idx]
             self._calibrate_threshold_from_holdout(flat_holdout, ref_bank)
 
-        compactness = float(getattr(self, "_compactness", 0.5))
-        threshold = float(getattr(self, "_threshold", 0.4))
-
         for pos in range(P):
             bank = spatial_banks[pos]
             if bank is None or bank.shape[0] == 0:
@@ -538,43 +599,34 @@ class BackboneMemoryBank(nn.Module):
             n = bank.shape[0]
             stacked[pos, :, :n] = bank.t()  # [C, n]
             sizes[pos] = n
-            comp_arr[pos] = compactness
-            thresh_arr[pos] = threshold
 
-        self._spatial_bank_stacked = stacked
-        self._spatial_bank_sizes = sizes
-        self._spatial_comp_stacked = comp_arr
-        self._spatial_thresh_stacked = thresh_arr
+        self.bank_stacked = stacked
+        self.bank_sizes = sizes
+        self.bank_thresh = torch.full((P,), float(getattr(self, "_threshold", 0.4) or 0.4), device=device)
         self._calibrated = True
-        self.update = False
 
     def reset_memory_bank(self) -> None:
         """Clear the bank and return to build mode."""
-        self.memory_bank = torch.empty(0, 0, device=self.memory_bank.device)
+        device = self.bank_stacked.device
         self.feature_dim = None
         self._calibrated = False
         self._compactness = None
         self._threshold = None
         self.update = True
-        self._bank_chunks: list[torch.Tensor] = []  # defer cat until freeze
-        # Spatial state
-        self._spatial_H = 0
-        self._spatial_W = 0
-        self._spatial_bank_chunks: list = []
-        self._spatial_bank_stacked = torch.empty(0, 0, 0, device=self._spatial_bank_stacked.device)
-        self._spatial_bank_sizes = torch.empty(0, dtype=torch.long, device=self._spatial_bank_sizes.device)
-        self._spatial_comp_stacked = torch.empty(0, device=self._spatial_comp_stacked.device)
-        self._spatial_thresh_stacked = torch.empty(0, device=self._spatial_thresh_stacked.device)
+        self._build_chunks = []  # defer cat until freeze
+        self._bank_H = self._bank_W = 0
+        self.bank_stacked = torch.empty(0, 0, 0, device=device)
+        self.bank_sizes = torch.empty(0, dtype=torch.long, device=device)
+        self.bank_thresh = torch.empty(0, device=device)
 
     def accumulate_features(self, feat_dict: dict[int, torch.Tensor]) -> None:
         """Extract and accumulate backbone features into the memory bank (build phase).
 
         Fused backbone features are L2-normalised per spatial position and appended
-        to a chunk list; the full bank is materialised once in ``freeze_memory_bank``
-        to avoid O(N²) reallocation from repeated ``torch.cat``.
-
-        When ``self.spatial`` is True, features are distributed into per-(h,w)
-        sub-banks so each position only compares against its own normal history.
+        to a chunk list; the bank is materialised once in ``freeze_memory_bank``
+        to avoid O(N²) reallocation from repeated ``torch.cat``. The same chunks
+        serve both modes: global freeze pools every position, per-position freeze
+        (``spatial=True``) splits them by (h, w).
         """
         if not feat_dict:
             return
@@ -584,31 +636,21 @@ class BackboneMemoryBank(nn.Module):
             self.feature_dim = C
 
         if self.spatial:
-            if self._spatial_H == 0:
-                self._spatial_H = H
-                self._spatial_W = W
-                self._spatial_bank_chunks = [[] for _ in range(H * W)]
-            elif H != self._spatial_H or W != self._spatial_W:
+            if self._bank_H == 0:
+                self._bank_H, self._bank_W = H, W
+            elif H != self._bank_H or W != self._bank_W:
                 raise ValueError(
-                    f"Spatial dims changed during build: "
-                    f"({self._spatial_H},{self._spatial_W}) -> ({H},{W})"
+                    f"Spatial dims changed during build: ({self._bank_H},{self._bank_W}) -> ({H},{W})"
                 )
-            flat = fused.permute(0, 2, 3, 1).reshape(-1, C)  # [B*H*W, C]
-            normed = F.normalize(flat, p=2, dim=1)
-            normed_4d = normed.reshape(-1, H, W, C)  # [B, H, W, C]
-            for h in range(H):
-                for w in range(W):
-                    pos = h * W + w
-                    self._spatial_bank_chunks[pos].append(normed_4d[:, h, w, :])  # [B, C]
-        else:
-            flat = fused.permute(0, 2, 3, 1).reshape(-1, C)  # [B*H*W, C]
-            normed = F.normalize(flat, p=2, dim=1)
-            self._bank_chunks.append(normed)
+        normed = F.normalize(fused.permute(0, 2, 3, 1).reshape(-1, C), p=2, dim=1)  # [B*H*W, C]
+        self._build_chunks.append(normed.reshape(-1, H, W, C))  # [B, H, W, C]
 
     def forward(self, feat_dict: dict[int, torch.Tensor]) -> torch.Tensor:
         """Produce (B, 1, H, W) anomaly heatmap from backbone features.
 
-        During build mode or when the bank is empty, returns zeros.
+        During build mode or when the bank is empty, returns zeros. Both bank modes
+        run the same stacked scoring kernel; a per-position bank additionally
+        interpolates the query to the bank's grid and scores at that resolution.
         """
         b, device = self._resolve_batch_size(feat_dict)
         h = feat_dict[list(feat_dict.keys())[0]].shape[2] if feat_dict else 80
@@ -616,83 +658,72 @@ class BackboneMemoryBank(nn.Module):
         if self.update:
             return torch.zeros(b, 1, h, w, device=device)
         fused = self._build_fused_feature(feat_dict)  # (B, C, H, W)
-        if fused.shape[1] != self.feature_dim:
-            return torch.zeros(b, 1, fused.shape[2], fused.shape[3], device=device)
-        if self.spatial:
-            return self._forward_spatial(fused)
-        mem = self._effective_bank()
-        if mem.shape[0] == 0:
-            return torch.zeros(b, 1, h, w, device=device)
-        bh, bw = fused.shape[2], fused.shape[3]
-        flat = fused.permute(0, 2, 3, 1).reshape(-1, self.feature_dim)
-        scores = self._anomaly_scores(flat, mem)  # [B*H*W]
-        hmap = scores.view(b, 1, bh, bw)
-        s = self.hmap_stretch_strength
-        if s:
-            hmap = (hmap + s * hmap * hmap).clamp(0, 1)
-        return hmap
-
-    def _forward_spatial(self, fused: torch.Tensor) -> torch.Tensor:
-        """Spatial-mode scoring: strict per-position, ONNX-friendly.
-
-        Interpolates query features to the bank's spatial resolution, then computes
-        per-position cosine similarity via a loop over positions. ONNX tracing
-        unrolls the loop into P small matmul nodes — correct but the graph is large
-        (acceptable for fixed-resolution export).
-        """
-        bank = self._spatial_bank_stacked   # [P, C, max_n]
-        sizes = self._spatial_bank_sizes     # [P]
-        thresh = self._spatial_thresh_stacked  # [P]
-
         B, C, H, W = fused.shape
-        C_bank = bank.shape[1]
-        max_n = bank.shape[2]
-
-        if C != C_bank:
-            return torch.zeros(B, 1, H, W, device=fused.device)
-
-        H_bank = self._spatial_H
-        W_bank = self._spatial_W
-        if H_bank <= 0 or W_bank <= 0:
-            return torch.zeros(B, 1, H, W, device=fused.device)
-
-        # Interpolate features to bank resolution (ONNX-friendly)
-        if H != H_bank or W != W_bank:
-            fused = F.interpolate(fused, size=(H_bank, W_bank), mode="bilinear", align_corners=False)
-
-        P = H_bank * W_bank
-
-        # Normalise query features: [B, C, H, W] -> [B, P, C]
-        flat = fused.permute(0, 2, 3, 1).reshape(B, P, C)
-        flat = F.normalize(flat, p=2, dim=-1)
-
-        # Per-position cosine similarity: loop over P — ONNX tracing unrolls to
-        # P bmm nodes (large but valid graph, acceptable at fixed resolution).
-        cos_parts: list[torch.Tensor] = []
-        for p in range(P):
-            q = flat[:, p:p + 1, :]          # [B, 1, C]
-            b = bank[p, :, :].unsqueeze(0).expand(B, C, max_n)  # [B, C, max_n]
-            cos = torch.bmm(q, b).squeeze(1)  # [B, max_n]
-            cos_parts.append(cos)
-        cos_sim = torch.stack(cos_parts, dim=1)  # [B, P, max_n]
-
-        # Top-K scoring (same formula as flat bank)
-        beta = self.temperature
-        K = min(self.K, max_n) if max_n > 0 else 1
-        valid = sizes > 0  # [P]
-
-        topk_vals, _ = cos_sim[:, :, :max_n].topk(K, dim=-1)  # [B, P, K]
-        thresh_b = thresh.reshape(1, P, 1)  # [1, P, 1]
-        psi = torch.sigmoid(beta * (topk_vals - thresh_b))
-        score = torch.exp(torch.log((1.0 - psi).clamp(min=1e-8)).mean(dim=-1))  # [B, P]
-
-        score[~valid.unsqueeze(0).expand(B, -1)] = 0.0
-
-        hmap = score.view(B, 1, H_bank, W_bank)
+        if C != self.feature_dim or not self.bank_built:
+            return torch.zeros(b, 1, H, W, device=device)
+        self._ensure_thresh()
+        if self._bank_H > 0:  # per-position bank: score each query cell against its own sub-bank
+            if H != self._bank_H or W != self._bank_W:
+                fused = F.interpolate(fused, size=(self._bank_H, self._bank_W), mode="bilinear", align_corners=False)
+            P = self._bank_H * self._bank_W
+            q = F.normalize(fused.permute(0, 2, 3, 1).reshape(B, P, C), p=2, dim=-1)
+            scores = self._score_stacked(q.transpose(0, 1))  # [P, B]
+            hmap = scores.transpose(0, 1).reshape(B, 1, self._bank_H, self._bank_W)
+        else:  # global bank: every query cell against the pooled bank, native resolution
+            q = F.normalize(fused.permute(0, 2, 3, 1).reshape(1, B * H * W, C), p=2, dim=-1)
+            hmap = self._score_stacked(q).reshape(B, 1, H, W)
         s = self.hmap_stretch_strength
         if s:
             hmap = (hmap + s * hmap * hmap).clamp(0, 1)
         return hmap
+
+    def _score_stacked(self, q: torch.Tensor) -> torch.Tensor:
+        """Noisy-OR anomaly scores for position-grouped queries — the single scoring kernel.
+
+        One batched matmul serves both bank modes (ONNX: a single MatMul node, no
+        per-position loop). Zero-padded bank slots are masked to cosine −1 so they
+        can never win the top-K.
+
+        Args:
+            q: [P, N, C] L2-normalised queries (global: P=1, N=B·H·W; per-position: N=B).
+
+        Returns:
+            [P, N] anomaly scores in [0, 1]; positions with an empty sub-bank score 0.
+        """
+        bank = self.bank_stacked  # [P, C, max_n]
+        P, _, max_n = bank.shape
+        n_q = q.shape[1]
+        pad = torch.arange(max_n, device=bank.device).view(1, 1, max_n) >= self.bank_sizes.view(P, 1, 1)
+        thresh = self.bank_thresh.view(P, 1, 1)
+        beta = self.temperature
+        k = min(self.K, max_n)
+        chunk = max(1, int(getattr(self, "score_chunk_elems", 1 << 27)) // max(P * max_n, 1))
+        out = []
+        for i in range(0, n_q, chunk):
+            cos = torch.bmm(q[:, i : i + chunk], bank)  # [P, n, max_n]
+            cos = cos.masked_fill(pad, -1.0)
+            if self.training:
+                cos = cos.masked_fill(cos > 0.999, float("-inf"))  # self-match exclusion
+            psi = torch.sigmoid(beta * (cos.topk(k, dim=-1).values - thresh))
+            out.append(torch.exp(torch.log((1.0 - psi).clamp(min=1e-8)).mean(dim=-1)))
+        score = torch.cat(out, dim=1) if len(out) > 1 else out[0]
+        return score.masked_fill(self.bank_sizes.view(P, 1) == 0, 0.0).clamp(0, 1)
+
+    def _ensure_thresh(self) -> None:
+        """Materialise ``bank_thresh`` — lazy compactness/threshold recompute after legacy loads."""
+        P = self.bank_stacked.shape[0]
+        if self.bank_thresh.numel() == P and bool(torch.isfinite(self.bank_thresh).all()):
+            return
+        if self._compactness is None:
+            self._compactness = self._measure_compactness(self._flat_view())
+            self._threshold = None  # force recompute below
+        if self._threshold is None:
+            import math
+
+            t = self.calibration_target_score
+            logit = math.log(max((1.0 - t) / max(t, 1e-6), 1e-6))
+            self._threshold = self._compactness - logit / max(self.temperature, 0.1)
+        self.bank_thresh = torch.full((P,), float(self._threshold), device=self.bank_stacked.device)
 
     # ------------------------------------------------------------------
     # Internals
@@ -704,14 +735,18 @@ class BackboneMemoryBank(nn.Module):
         return 1, torch.device("cpu")
 
     def _effective_bank(self) -> torch.Tensor:
-        """Return real memory-bank entries excluding zero-padding placeholders."""
-        if self.update and self._bank_chunks:
-            return torch.cat(self._bank_chunks, dim=0)
-        mem = self.memory_bank
-        if self.feature_dim is None or mem.numel() == 0 or mem.shape[0] == 0:
-            return mem[:0]
-        valid = mem.norm(dim=1) > 0
-        return mem[valid]
+        """Return real memory-bank entries as a flat [M, C] view (padding stripped)."""
+        if self.update and self._build_chunks:
+            return torch.cat([c.reshape(-1, c.shape[-1]) for c in self._build_chunks], dim=0)
+        return self._flat_view()
+
+    def _flat_view(self) -> torch.Tensor:
+        """All frozen bank vectors as a flat [M, C] tensor (P=1: the original bank, zero-copy order)."""
+        bank, sizes = self.bank_stacked, self.bank_sizes
+        if bank.numel() == 0:
+            return bank.new_zeros(0, 0)
+        cols = [bank[p, :, : int(sizes[p])].t() for p in range(bank.shape[0]) if int(sizes[p]) > 0]
+        return torch.cat(cols, dim=0) if cols else bank.new_zeros(0, 0)
 
     def _build_fused_feature(self, feat_dict: dict[int, torch.Tensor]) -> torch.Tensor:
         """Gather backbone features at configured layer indices and concat."""
@@ -808,25 +843,6 @@ class BackboneMemoryBank(nn.Module):
             self._threshold,
             self.calibration_target_score,
         )
-
-    def _score_with_threshold(
-        self, features: torch.Tensor, mem: torch.Tensor, threshold_cos: float, beta: float | None = None
-    ) -> torch.Tensor:
-        """Compute anomaly scores with specific threshold & β (stateless, for calibration)."""
-        if beta is None:
-            beta = self.temperature
-        q = F.normalize(features.view(-1, self.feature_dim), p=2, dim=1)
-        k = min(self.K, mem.shape[0])
-        n, m = q.shape[0], mem.shape[0]
-        chunk = max(1, int(getattr(self, "score_chunk_elems", 1 << 27)) // max(m, 1))
-        out = []
-        for i in range(0, n, chunk):
-            cos = q[i : i + chunk] @ mem.t()
-            psi = torch.sigmoid(beta * (cos - threshold_cos))
-            topk = psi.topk(k=k, dim=1).values
-            log_prob = torch.log((1.0 - topk).clamp(min=1e-8)).mean(dim=1)
-            out.append(torch.exp(log_prob))
-        return torch.cat(out).clamp(0, 1)
 
     def _calibrate_threshold_from_holdout(self, holdout: torch.Tensor, mem: torch.Tensor) -> None:
         """Calibrate β & threshold so p95 of hold-out normal scores ≈ target.
@@ -932,50 +948,6 @@ class BackboneMemoryBank(nn.Module):
             best_achieved,
             best_spread,
         )
-
-    def _anomaly_scores(self, features: torch.Tensor, mem: torch.Tensor | None = None) -> torch.Tensor:
-        """Noisy-OR cosine anomaly scores ∈ [0, 1] for every spatial position.
-
-        Args:
-            features: [N, C] query features.
-            mem: [M, C] memory bank. If None, uses ``self._effective_bank()``.
-
-        Returns:
-            [N] tensor of anomaly scores.
-        """
-        if mem is None:
-            mem = self._effective_bank()
-        if mem.numel() == 0 or mem.shape[0] == 0:
-            return torch.full((features.shape[0],), 0.5, device=features.device)
-        # Lazy recompute after state_dict load (compactness/threshold are not persisted)
-        if self._compactness is None and self._calibrated:
-            self._compactness = self._measure_compactness(mem)
-            self._threshold = None  # force recompute below
-        if self._threshold is None and self._compactness is not None:
-            import math
-
-            t = self.calibration_target_score
-            logit = math.log(max((1.0 - t) / max(t, 1e-6), 1e-6))
-            self._threshold = self._compactness - logit / max(self.temperature, 0.1)
-        q = F.normalize(features.view(-1, self.feature_dim), p=2, dim=1)
-        k = min(self.K, mem.shape[0])
-        n, m = q.shape[0], mem.shape[0]
-        chunk = max(1, int(getattr(self, "score_chunk_elems", 1 << 27)) // max(m, 1))
-        use_sigmoid = self._threshold is not None and self._compactness is not None
-        beta = self.temperature
-        out = []
-        for i in range(0, n, chunk):
-            cos = q[i : i + chunk] @ mem.t()  # [chunk, M] cosine similarities
-            if self.training:
-                cos = cos.masked_fill(cos > 0.999, float("-inf"))
-            if use_sigmoid:
-                psi = torch.sigmoid(beta * (cos - self._threshold))  # cos-space sigmoid
-            else:
-                psi = torch.exp(-beta * (1.0 - cos))  # legacy exp, un-normalized
-            topk = psi.topk(k=k, dim=1).values  # [chunk, k]
-            log_prob = torch.log((1.0 - topk).clamp(min=1e-8)).mean(dim=1)
-            out.append(torch.exp(log_prob))
-        return torch.cat(out).clamp(0, 1)
 
     @staticmethod
     def _coreset_subsample(mem: torch.Tensor, max_size: int, return_indices: bool = False):

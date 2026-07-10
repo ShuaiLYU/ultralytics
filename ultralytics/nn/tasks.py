@@ -692,13 +692,7 @@ class YOLOAnomalyV2Model(DetectionModel):
     @property
     def has_memory_bank(self) -> bool:
         """``True`` when a calibrated memory bank is loaded and ready for scoring."""
-        if self.memory_bank is None:
-            return False
-        mb = self.memory_bank
-        if mb.spatial:
-            sizes = getattr(mb, "_spatial_bank_sizes", None)
-            return sizes is not None and (sizes > 0).any()
-        return mb.memory_bank is not None and mb.memory_bank.shape[0] > 0
+        return self.memory_bank is not None and self.memory_bank.bank_built
 
     def init_criterion(self):
         """Initialize the loss criterion.
@@ -931,17 +925,14 @@ class YOLOAnomalyV2Model(DetectionModel):
             n_ingested += len(chunk)
 
         mb.freeze_memory_bank()
-        if mb.spatial:
-            final_size = int(mb._spatial_bank_sizes.sum().item()) if mb._spatial_bank_sizes is not None else 0
-        else:
-            final_size = mb.memory_bank.shape[0]
+        final_size = mb.num_features
         if verbose:
             LOGGER.info(
                 f"Memory bank frozen: {final_size} features, dim={mb.feature_dim}\n"
                 f"  config: temp={mb.temperature:.4f}, K={mb.K}, "
                 f"max_bank={mb.max_bank_size or 'unlimited'}, holdout_max={mb.holdout_max}, "
                 f"bb_layers={self._bb_layers}"
-                f"{f', spatial=({mb._spatial_H}x{mb._spatial_W})' if mb.spatial else ''}"
+                f"{f', grid={mb._bank_H}x{mb._bank_W}' if mb._bank_H else ''}"
             )
         return final_size
 

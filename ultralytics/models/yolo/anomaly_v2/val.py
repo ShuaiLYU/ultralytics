@@ -255,7 +255,7 @@ class YOLOAnomalyValidatorBase:
                 "(model YAML needs a bb_layers block)."
             )
             return False
-        if mb.memory_bank is not None and mb.memory_bank.shape[0] > 0:
+        if mb.bank_built:
             return True  # caller already supplied a bank — use it, don't rebuild or clear it
         support = self._collect_support_paths()
         if not support:

@@ -48,20 +48,22 @@ refer_data_yaml=os.path.abspath(f"../datasets/lvis_train_vps.yaml")
 
 DATA_CONFIG=dict()
 
-lvis_data=os.path.abspath("../datasets/lvis.yaml")
+# old-engine data: absolute paths on the shared NFS mount /data/shared-datasets
+# (portable across ultra6 users; formerly relative ../datasets/...)
+lvis_data=os.path.abspath("/data/shared-datasets/louis_data/lvis.yaml")
 
 
 old_flickr_data= dict(
-                img_path="../datasets/flickr/full_images/",
-                json_file="../datasets/flickr/annotations/final_flickr_separateGT_train_segm.json",
+                img_path="/data/shared-datasets/louis_data/flickr/full_images/",
+                json_file="/data/shared-datasets/louis_data/flickr/annotations/final_flickr_separateGT_train_segm.json",
             )
 old_mixed_data= dict(
-                img_path="../datasets/mixed_grounding/gqa/images",
-                json_file="../datasets/mixed_grounding/annotations/final_mixed_train_no_coco_segm.json",
+                img_path="/data/shared-datasets/louis_data/mixed_grounding/gqa/images",
+                json_file="/data/shared-datasets/louis_data/mixed_grounding/annotations/final_mixed_train_no_coco_segm.json",
             )
 old_obj365_data= dict(
-                img_path="../datasets/Objects365v1/images/train",
-                json_file="../datasets/Objects365v1/annotations/objects365_train_segm.json",
+                img_path="/data/shared-datasets/louis_data/Objects365v1/images/train",
+                json_file="/data/shared-datasets/louis_data/Objects365v1/annotations/objects365_train_segm.json",
             )  
 
 
@@ -80,8 +82,6 @@ new_obj365_v4= dict(
                 json_file=f"{train_data_root}/{obj365_v4_json}",
             )
 
-
-yoloep_v4=None # to do 
 
 new_flickr_v5= dict(
                 img_path=f"{train_data_root}/flickr/full_images/",
@@ -106,30 +106,40 @@ ye_v5= dict(img_path=f"{train_data_root}/yolo-enterprise/images/train",
 
 
 
+# ================= Version A — old-engine data (made by Louis) =================
+# DATA_CONFIG["old_engine_data"] = dict(
+#     train=dict(grounding_data=[ old_flickr_data, old_mixed_data, old_obj365_data],),
+#     val=dict(yolo_data=[lvis_data]),
+# )
+
+
 DATA_CONFIG["old_engine_data"] = dict(
-    train=dict(grounding_data=[ old_flickr_data, old_mixed_data, old_obj365_data],),
-    val=dict(yolo_data=[lvis_data]),
-)
-
-
-
-
-
-DATA_CONFIG["newdatav4"]=dict(
     train=dict(
-        grounding_data=[ new_flickr_v4, new_mixed_v4, new_obj365_v4],
+        grounding_data=[
+            dict(
+                img_path=f"{train_data_root}/Objects365v1/images/train",
+                json_file=f"{train_data_root}/datasets/Objects365v1/annotations/objects365_train_segm.engine.cache",
+            ) ,
+            dict(
+                img_path=f"{train_data_root}/flickr/full_images/",
+                json_file=f"{train_data_root}/datasets/flickr/annotations/final_flickr_separateGT_train_segm.engine.cache"
+            ),
+            dict(
+                img_path=f"{train_data_root}/mixed_grounding/gqa/images",
+                json_file=f"{train_data_root}/datasets/mixed_grounding/annotations/final_mixed_train_no_coco_segm.engine.cache"
+            ),
+        ]
     ),
-    val=dict(yolo_data=[lvis_data]),
+    val=dict(
+        yolo_data=[f"{train_data_root}/lvis.yaml"]
+    )
 )
 
 
-DATA_CONFIG["newdatav4_obj365v5"]=dict(
-    train=dict(
-        grounding_data=[ new_flickr_v4, new_mixed_v4, new_obj365_v5],
-    ),
-    val=dict(yolo_data=[lvis_data]),
-)
 
+
+
+# ========== Version B — enterprise data (Fatih's pipeline, v4 / v5) ==========
 DATA_CONFIG["newdatav5"]=dict(
     train=dict(
         grounding_data=[ new_flickr_v5, new_mixed_v5, new_obj365_v5],
@@ -160,106 +170,13 @@ DATA_CONFIG["yedata"]=dict(
 
 
 
-DATA_CONFIG["old_objv1_only"]=dict(
-    train=dict(
-        grounding_data=[ old_obj365_data],
-    ),
-    val=dict(yolo_data=[lvis_data]),
-)
-DATA_CONFIG["new_objv5_only"]=dict(
-    train=dict(
-        grounding_data=[ new_obj365_v5],
-    ),
-    val=dict(yolo_data=[lvis_data]),
-)
 
 
-DATA_CONFIG["old_objv1_yolo_only"]=dict(
-    train=dict(
-        yolo_data=[ "../datasets/Objects365v1.yaml"],
-    ),
-    val=dict(yolo_data=[lvis_data]),
-)
-
-
-DATA_CONFIG["old_objv1_yolo_only_objval"]=dict(
-    train=dict(
-        yolo_data=[ "../datasets/Objects365v1.yaml"],
-    ),
-    val=dict(yolo_data=[ "../datasets/Objects365v1.yaml"]),
-)
 
 
 
 
  
-# /data/shared-datasets/louis_data
-
-
-DATA_CONFIG["yoloe_train_data"] = dict(
-    train=dict(
-        yolo_data=["../datasets/Objects365v1.yaml"],
-        grounding_data=[
-            dict(
-                img_path="../datasets/flickr/full_images/",
-                json_file="../datasets/flickr/annotations/final_flickr_separateGT_train_segm.json"
-            ),
-            dict(
-                img_path="../datasets/mixed_grounding/gqa/images",
-                json_file="../datasets/mixed_grounding/annotations/final_mixed_train_no_coco_segm.json"
-            ),
-        ]
-    ),
-    val=dict(
-        yolo_data=["../datasets/lvis.yaml"]
-    )
-)
-
-DATA_CONFIG["yoloe_train_data_noobj365"] = dict(
-    train=dict(
-        # yolo_data=["../datasets/Objects365v1.yaml"],
-        grounding_data=[
-            dict(
-                img_path="../datasets/flickr/full_images/",
-                json_file="../datasets/flickr/annotations/final_flickr_separateGT_train_segm.json"
-            ),
-            dict(
-                img_path="../datasets/mixed_grounding/gqa/images",
-                json_file="../datasets/mixed_grounding/annotations/final_mixed_train_no_coco_segm.json"
-            ),
-        ]
-    ),
-    val=dict(
-        yolo_data=["../datasets/lvis.yaml"]
-    )
-)
-
-
-
-DATA_CONFIG["old_enginecache"] = dict(
-    train=dict(
-        grounding_data=[
-            dict(
-                img_path="../datasets/Objects365v1/images/train",
-                json_file="../datasets/Objects365v1/annotations/objects365_train_segm.engine.cache",
-            ) ,
-            dict(
-                img_path="../datasets/flickr/full_images/",
-                json_file="../datasets/flickr/annotations/final_flickr_separateGT_train_segm.engine.cache"
-            ),
-            dict(
-                img_path="../datasets/mixed_grounding/gqa/images",
-                json_file="../datasets/mixed_grounding/annotations/final_mixed_train_no_coco_segm.engine.cache"
-            ),
-        ]
-    ),
-    val=dict(
-        yolo_data=["../datasets/lvis.yaml"]
-    )
-)
-
-
-
 import ultralytics,os
 workspace = os.path.dirname(os.path.dirname(os.path.abspath(ultralytics.__file__)))
 os.chdir(workspace)

@@ -368,6 +368,59 @@ def convert_coco(
     LOGGER.info(f"{'LVIS' if lvis else 'COCO'} data converted successfully.\nResults saved to {save_dir.resolve()}")
 
 
+def yolo2coco_gt(labels: list[dict], names: dict[int, str], save_path: str | Path) -> Path:
+    """Write a COCO-format ground-truth JSON from a YOLO dataset's cached labels.
+
+    Enables COCO-style evaluation (including AP_small/medium/large) on any YOLO dataset, not just COCO and LVIS. Image
+    ids and category ids match those emitted by `DetectionValidator.pred_to_json`, so the result pairs directly with a
+    `predictions.json`. Boxes come from the label cache, so a segmentation dataset validated as `task=detect` yields the
+    same polygon-derived boxes the model was trained against.
+
+    Args:
+        labels (list[dict]): Cached dataset labels, each with 'im_file', 'shape' (h, w), 'cls' and normalized xywh
+            'bboxes' keys.
+        names (dict[int, str]): Class index to class name mapping.
+        save_path (str | Path): Destination JSON path.
+
+    Returns:
+        (Path): Path to the written JSON file.
+    """
+    from ultralytics.data.utils import exif_size
+
+    images, annotations = [], []
+    for lb in labels:
+        path = Path(lb["im_file"])
+        img_id = int(path.stem) if path.stem.isnumeric() else path.stem
+        # Rectangular dataloaders pop 'shape' in BaseDataset.set_rectangle, so fall back to the image header
+        h, w = lb["shape"] if "shape" in lb else exif_size(Image.open(path))[::-1]
+        images.append({"id": img_id, "file_name": path.name, "height": h, "width": w})
+        for c, (x, y, bw, bh) in zip(lb["cls"].reshape(-1).tolist(), lb["bboxes"].tolist()):
+            bw, bh = bw * w, bh * h  # denormalize
+            annotations.append(
+                {
+                    "id": len(annotations) + 1,
+                    "image_id": img_id,
+                    "category_id": int(c) + 1,  # matches class_map = range(1, nc + 1)
+                    "bbox": [x * w - bw / 2, y * h - bh / 2, bw, bh],  # xywh top-left
+                    "area": bw * bh,
+                    "iscrowd": 0,
+                }
+            )
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(save_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "images": images,
+                "annotations": annotations,
+                "categories": [{"id": i + 1, "name": n} for i, n in names.items()],
+            },
+            f,
+        )
+    LOGGER.info(f"COCO ground truth written to {save_path} ({len(images)} images, {len(annotations)} annotations)")
+    return save_path
+
+
 def convert_segment_masks_to_yolo_seg(masks_dir: str, output_dir: str, classes: int):
     """Convert a dataset of segmentation mask images to the YOLO segmentation format.
 

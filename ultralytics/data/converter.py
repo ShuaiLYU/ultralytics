@@ -368,7 +368,9 @@ def convert_coco(
     LOGGER.info(f"{'LVIS' if lvis else 'COCO'} data converted successfully.\nResults saved to {save_dir.resolve()}")
 
 
-def yolo2coco_gt(labels: list[dict], names: dict[int, str], save_path: str | Path) -> Path:
+def yolo2coco_gt(
+    labels: list[dict], names: dict[int, str], save_path: str | Path, ids: dict[str, int] | None = None
+) -> Path:
     """Write a COCO-format ground-truth JSON from a YOLO dataset's cached labels.
 
     Enables COCO-style evaluation (including AP_small/medium/large) on any YOLO dataset, not just COCO and LVIS. Image
@@ -381,6 +383,8 @@ def yolo2coco_gt(labels: list[dict], names: dict[int, str], save_path: str | Pat
             'bboxes' keys.
         names (dict[int, str]): Class index to class name mapping.
         save_path (str | Path): Destination JSON path.
+        ids (dict[str, int], optional): Filename stem to integer image id mapping. Required by evaluators that reject
+            non-numeric ids; defaults to the numeric stem, or the stem itself when it is not a number.
 
     Returns:
         (Path): Path to the written JSON file.
@@ -390,7 +394,7 @@ def yolo2coco_gt(labels: list[dict], names: dict[int, str], save_path: str | Pat
     images, annotations = [], []
     for lb in labels:
         path = Path(lb["im_file"])
-        img_id = int(path.stem) if path.stem.isnumeric() else path.stem
+        img_id = ids[path.stem] if ids else (int(path.stem) if path.stem.isnumeric() else path.stem)
         # Rectangular dataloaders pop 'shape' in BaseDataset.set_rectangle, so fall back to the image header
         h, w = lb["shape"] if "shape" in lb else exif_size(Image.open(path))[::-1]
         images.append({"id": img_id, "file_name": path.name, "height": h, "width": w})

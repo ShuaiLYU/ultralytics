@@ -93,6 +93,11 @@ class DetectionValidator(BaseValidator):
         self.args.save_json |= self.args.coco_eval or (
             self.args.val and (self.is_coco or self.is_lvis) and not self.training
         )  # run final val, or every epoch when coco_eval is requested
+        self.coco_generic = self.args.coco_eval and not (self.is_coco or self.is_lvis)  # COCO eval on any dataset
+        # faster-coco-eval requires integer image ids, so index the filenames a COCO dataset would have as numbers
+        self.coco_img_ids = (
+            {Path(f).stem: i for i, f in enumerate(self.dataloader.dataset.im_files)} if self.coco_generic else None
+        )
         self.names = model.names
         self.nc = len(model.names)
         self.end2end = getattr(model, "end2end", False)
@@ -434,7 +439,7 @@ class DetectionValidator(BaseValidator):
         """
         path = Path(pbatch["im_file"])
         stem = path.stem
-        image_id = int(stem) if stem.isnumeric() else stem
+        image_id = self.coco_img_ids[stem] if self.coco_img_ids else (int(stem) if stem.isnumeric() else stem)
         box = ops.xyxy2xywh(predn["bboxes"])  # xywh
         box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
         for b, s, c in zip(box.tolist(), predn["conf"].tolist(), predn["cls"].tolist()):
@@ -470,10 +475,10 @@ class DetectionValidator(BaseValidator):
             (dict[str, Any]): Updated statistics dictionary with COCO/LVIS evaluation results.
         """
         pred_json = self.save_dir / "predictions.json"  # predictions
-        if self.args.coco_eval and not (self.is_coco or self.is_lvis):
+        if self.coco_generic:
             anno_json = self.save_dir / f"gt_{self.args.split}.json"  # built once per run, reused every epoch
             if not anno_json.exists():
-                converter.yolo2coco_gt(self.dataloader.dataset.labels, self.names, anno_json)
+                converter.yolo2coco_gt(self.dataloader.dataset.labels, self.names, anno_json, self.coco_img_ids)
         else:
             anno_json = (
                 self.data["path"]
@@ -508,7 +513,7 @@ class DetectionValidator(BaseValidator):
         Returns:
             (dict[str, Any]): Updated stats dictionary containing the computed COCO/LVIS evaluation metrics.
         """
-        generic = self.args.coco_eval and not (self.is_coco or self.is_lvis)  # COCO-style eval on an arbitrary dataset
+        generic = self.coco_generic
         if self.args.save_json and (self.is_coco or self.is_lvis or generic) and len(self.jdict):
             LOGGER.info(f"\nEvaluating faster-coco-eval mAP using {pred_json} and {anno_json}...")
             try:
@@ -525,9 +530,8 @@ class DetectionValidator(BaseValidator):
                     val = COCOeval_faster(
                         anno, pred, iouType=iou_type, lvis_style=self.is_lvis, print_function=LOGGER.info
                     )
-                    stems = [Path(x).stem for x in self.dataloader.dataset.im_files]
-                    # match the ids pred_to_json emits, which keeps non-numeric filenames as strings
-                    val.params.imgIds = [int(s) if s.isnumeric() else s for s in stems]  # images to eval
+                    stems = [Path(x).stem for x in self.dataloader.dataset.im_files]  # images to eval
+                    val.params.imgIds = [self.coco_img_ids[s] for s in stems] if generic else [int(s) for s in stems]
                     val.evaluate()
                     val.accumulate()
                     val.summarize()

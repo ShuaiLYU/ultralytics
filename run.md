@@ -400,6 +400,42 @@ architectural change moves it by 0.005, the ablation programme's priorities are 
 Still queued, not launched: Z2 on `dspcbsd`, Z3 on `tianchifabirc`, Z4 (P2 head, held by Louis), Z6
 (`scale=0.2`, mechanism overlaps Z5 — read Z5 first), and the dfl sweep beyond `dfl=0` (gated on Z1).
 
+## Third wave — queued via `--after`, fills GPUs 4/5/6/7 as tenants free
+
+Snap **`d942b647fb86`** (package code byte-identical to `bca283c87`/`20b6e886`/`0ccb13883`; the commit
+only adds run.md). Each job is chained to a running predecessor with `nohupyolo --after <run>`, so it
+polls the predecessor's PID, then +20 s VRAM settle, then launches. Every successor replaces a tenant on
+the **same card** it waits on, so no card ever exceeds its current occupancy.
+
+```bash
+EXP=/Users/louis/workspace/ultra_louis_work/expman/.venv/bin/expman-cli
+D=/data/shared-datasets/louis_data/anomaly_bench
+P=yolo26-defect-bench
+
+$EXP bundle
+
+$EXP launch --snap --args "nohupyolo --after dspcbsd_z3_k6_n_s0     train data=$D/dspcbsd/data.yaml       model=yolo26n.pt     epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True cls_pw=0.5 device=5 project=$P name=dspcbsd_z2_clspw05_n_s0"
+$EXP launch --snap --args "nohupyolo --after 3cad_z3_k6_n_s0        train data=$D/tianchifabirc/data.yaml model=yolo26n-k6.yaml pretrained=/home/louis/ultra_louis_work/yolo26n-k6.pt epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True device=6 project=$P name=tianchifabirc_z3_k6_n_s0"
+$EXP launch --snap --args "nohupyolo --after tianchifabirc_z1_dfl0_n_s0 train data=$D/tianchifabirc/data.yaml model=yolo26n.pt  epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True mosaic=0.0 device=4 project=$P name=tianchifabirc_z5_mosaic0_n_s0"
+$EXP launch --snap --args "nohupyolo --after dspcbsd_z1_dfl0_n_s0   train data=$D/dspcbsd/data.yaml       model=yolo26n.pt     epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True mosaic=0.0 device=4 project=$P name=dspcbsd_z5_mosaic0_n_s0"
+$EXP launch --snap --args "nohupyolo --after dspcbsd_z7_imgsz960_n_s0 train data=$D/3cad/data.yaml        model=yolo26n.pt     epochs=100 imgsz=960 batch=128 seed=0 coco_eval=True device=6 project=$P name=3cad_z7_imgsz960_n_s0"
+$EXP launch --snap --args "nohupyolo --after tianchifabirc_z2_clspw05_n_s0 train data=$D/tianchifabirc/data.yaml model=yolo26n.pt epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True cls_pw=1.0 device=7 project=$P name=tianchifabirc_z2_clspw10_n_s0"
+```
+
+| queued run                   | waits on (PID → run)        | variable      | GPU |
+| ---------------------------- | --------------------------- | ------------- | --- |
+| `dspcbsd_z2_clspw05_n_s0`    | 3095507 `dspcbsd_z3_k6`     | cls_pw=0.5    | 5   |
+| `tianchifabirc_z3_k6_n_s0`   | 3122342 `3cad_z3_k6`        | k=6           | 6   |
+| `tianchifabirc_z5_mosaic0`   | 3069100 `tianchifabirc_z1`  | mosaic=0.0    | 4   |
+| `dspcbsd_z5_mosaic0_n_s0`    | 3070978 `dspcbsd_z1`        | mosaic=0.0    | 4   |
+| `3cad_z7_imgsz960_n_s0`      | 3120263 `dspcbsd_z7_960`    | imgsz=960     | 6   |
+| `tianchifabirc_z2_clspw10`   | 3125776 `tianchifabirc_z2_05` | cls_pw=1.0  | 7   |
+
+All six are `status=queued`, `.status` files record `Waiting for: PID <n> to exit, then +20s settle`.
+`3cad_z7_imgsz960` (~48 GB) chains onto the other 48 GB `imgsz=960` job on the same card, so the big
+slot is handed off rather than double-booked. Still deliberately unqueued (gated on results, not on a
+free card): Z6 `scale=0.2` (after Z5), the `dfl` sweep (after Z1), Z4 (held by Louis).
+
 ## Two operational notes
 
 - `refs/louis/laptop-head` **vanished on ultra6** mid-session; `launch` failed with "cannot read HEAD" and

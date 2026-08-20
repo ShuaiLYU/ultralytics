@@ -171,11 +171,29 @@ $EXP launch --snap --args "nohupyolo 0 train data=/data/shared-datasets/louis_da
 
 Dataset yamls: `/data/shared-datasets/louis_data/anomaly_bench/{3cad,tianchifabirc,dspcbsd}/data.yaml`.
 
-Status: **running.** `dspcbsd` 52 train batches/epoch at ~1.5 it/s. Results, per-class tables, the test
-split numbers and the noise floor go here when they finish.
+Status: **running.** `dspcbsd` 52 train batches/epoch at ~1.5 it/s, ~83 min for 100 epochs. Results,
+per-class tables, the test split numbers and the noise floor go here when they finish.
 
 `batch=128` is now fixed for every later ablation on this branch — a change measured against these
 baselines cannot also change the batch size.
+
+## Reporting val and test — `eval_bench.py`
+
+Training only ever validates `val`. Test numbers, and AP_small/medium/large on either split, come from
+`eval_bench.py` (commit `4140049a0`), run on ultra6 because that is where the weights and data live:
+
+```bash
+EXP=/Users/louis/workspace/ultra_louis_work/expman/.venv/bin/expman-cli
+$EXP launch --snap --args "nohuppython eval_bench.py --project runs/yolo26-defect-bench --splits val test --device 6"
+```
+
+Writes `runs/yolo26-defect-bench/eval/{overall,per_class}.csv` and prints both as markdown tables. It
+reads the data yaml and `imgsz` back from each run's `args.yaml`, so a number cannot drift from the run
+that produced it, and it warns and skips a split the dataset does not declare rather than crashing.
+
+Why a script rather than `model.val(split="test")`: `model.val()` returns a `DetMetrics` object, and
+`DetMetrics.keys` does not include the `(B-coco)` keys — those live only in the stats dict the validator
+returns. Calling `DetectionValidator` directly is the only route to AP_small/medium/large here.
 
 ---
 

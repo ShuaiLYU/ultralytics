@@ -281,3 +281,62 @@ be passed as an absolute path.
 `Focus`'s ONNX graph did not contain a native `SpaceToDepth`; its slicing lowered to `Slice`+`Concat`
 (`Slice` count 2 -> 18, exactly 8 per `Focus`). Both are standard ops needing no plugin, so the design
 doc's "export-clean" conclusion held, but not for the stated reason. Moot now that the conv form is used.
+
+---
+
+# Phase B — Z1 / Z2 / Z3 launched
+
+Snap commit **`20b6e886f0c2`** · `yolo26n` · `epochs=100` · `imgsz=640` · `batch=128` · `seed=0` ·
+`coco_eval=True` · `project=yolo26-defect-bench`. Launched 2026-08-21 on GPU 4 and 5, which freed when the
+`yoloa_clean` job finished. Package code is unchanged from the Phase A baseline snapshot `0ccb13883`
+except for the addition of an unused yaml, so these are directly comparable to those baselines.
+
+**Z4 (P2 head) stays in the plan but is deliberately not launched yet** (Louis's call).
+
+```bash
+EXP=/Users/louis/workspace/ultra_louis_work/expman/.venv/bin/expman-cli
+B="model=yolo26n.pt epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True project=yolo26-defect-bench"
+D=/data/shared-datasets/louis_data/anomaly_bench
+
+# Z1 — drop the L1-on-ltrb term. Gates M2: if AP_small falls, NWD largely duplicates this term.
+for d in 3cad tianchifabirc dspcbsd; do
+  $EXP launch --snap --args "nohupyolo 0 train data=$D/$d/data.yaml $B dfl=0 device=4 name=${d}_z1_dfl0_n_s0"
+done
+
+# Z2 — inverse-frequency class weights, on the long-tailed dataset. cls_pw is asserted to [0, 1].
+$EXP launch --snap --args "nohupyolo 0 train data=$D/3cad/data.yaml $B cls_pw=0.5 device=5 name=3cad_z2_clspw05_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=$D/3cad/data.yaml $B cls_pw=1.0 device=5 name=3cad_z2_clspw10_n_s0"
+
+# Z3 — widen the two early downsampling kernels. Donor first, on CPU, then the run.
+$EXP launch yolo26-defect-bench --snap --py ultra --args "python scripts/anomaly_bench/make_k6_donor.py --src /home/louis/ultra_louis_work/ultralytics/yolo26n.pt --cfg yolo26n-k6.yaml --out /home/louis/ultra_louis_work/yolo26n-k6.pt --check name=k6_donor > /home/louis/ultra_louis_work/ultralytics/runs/yolo26-defect-bench/k6_donor.log 2>&1"
+
+$EXP launch --snap --args "nohupyolo 0 train data=$D/dspcbsd/data.yaml model=yolo26n-k6.yaml pretrained=/home/louis/ultra_louis_work/yolo26n-k6.pt epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True device=5 project=yolo26-defect-bench name=dspcbsd_z3_k6_n_s0"
+```
+
+| run                          | dataset       | variable               | GPU |
+| ---------------------------- | ------------- | ---------------------- | --- |
+| `3cad_z1_dfl0_n_s0`          | 3cad          | `dfl=0`                | 4   |
+| `tianchifabirc_z1_dfl0_n_s0` | tianchifabirc | `dfl=0`                | 4   |
+| `dspcbsd_z1_dfl0_n_s0`       | dspcbsd       | `dfl=0`                | 4   |
+| `3cad_z2_clspw05_n_s0`       | 3cad          | `cls_pw=0.5`           | 5   |
+| `3cad_z2_clspw10_n_s0`       | 3cad          | `cls_pw=1.0`           | 5   |
+| `dspcbsd_z3_k6_n_s0`         | dspcbsd       | k=6 early downsampling | 5   |
+
+Donor verified on ultra6: 708 tensors, 2 kernels embedded, `max abs diff = 0.000e+00` against
+`yolo26n.pt`. Log at `runs/yolo26-defect-bench/k6_donor.log`.
+
+**Z3's confound is confirmed removed in the run itself**: both `dspcbsd_z3_k6_n_s0` and
+`dspcbsd_baseline_n_s0` report `Transferred 606/708 items`. The 102 skipped tensors are the 80-class head,
+which both arms lose identically because `nc=9`. Had the widened kernels failed to transfer, Z3 would read
+604/708.
+
+## Launcher notes, each of which cost a failed launch
+
+- `expman-cli launch` needs a literal `name=` token in `--args`, or the workspace given positionally
+  (`launch yolo26-defect-bench ...`) plus `project=` in the args.
+- `nohuppython` needs argparse-style `--project`/`--name` and **hard-errors on any bare `name=` token**, so
+  the two launchers' contracts cannot both be met in one arg string. `make_k6_donor.py` accepts both forms.
+- Plain `python` through `--args` does not activate the conda env (`ModuleNotFoundError: cv2`) and writes no
+  log. Pass `--py ultra` and redirect stdout yourself; `nohuppython` is what normally does both.
+- GPU capacity is set by residency, not job count: these runs measure ~25 GB each at `batch=128`, so a card
+  already holding a 45 GB job fits one more, not two. Packing to 97% risks taking down the tenant.

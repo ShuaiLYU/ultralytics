@@ -102,9 +102,12 @@ def main() -> None:
     p.add_argument("--cfg", default="yolo26n-k6.yaml", help="model yaml with widened downsampling convs")
     p.add_argument("--out", default="yolo26n-k6.pt", help="destination checkpoint")
     p.add_argument("--check", action="store_true", help="verify the donor matches the source forward pass")
-    # nohuppython and expman-cli both require these for their own bookkeeping; unused here
+    # Launcher bookkeeping, unused here. The two launchers disagree: nohuppython demands --project/--name
+    # and hard-errors on a bare name= token, while expman-cli launch demands exactly that token. Accept
+    # both so this can be launched either way.
     p.add_argument("--project", help="ignored; required by the nohuppython launcher")
     p.add_argument("--name", help="ignored; required by the nohuppython launcher")
+    p.add_argument("token", nargs="?", help="ignored; expman-cli launch requires a name= token in the args")
     a = p.parse_args()
 
     path, kept, embedded = build(a.src, a.cfg, a.out)

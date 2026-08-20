@@ -286,6 +286,12 @@ class BaseValidator:
             self.finalize_metrics()
             self.print_results()
             self.run_callbacks("on_val_end")
+            # coco_eval additionally runs this every epoch during training to track AP_small/medium/large
+            if self.args.save_json and self.jdict and (self.args.coco_eval or not self.training):
+                with open(str(self.save_dir / "predictions.json"), "w", encoding="utf-8") as f:
+                    LOGGER.info(f"Saving {f.name}...")
+                    json.dump(self.jdict, f)  # flatten and save
+                stats = self.eval_json(stats)  # update stats
 
         if self.training:
             # Reduce loss across all GPUs
@@ -306,11 +312,6 @@ class BaseValidator:
                     *tuple(self.speed.values())
                 )
             )
-            if self.args.save_json and self.jdict:
-                with open(str(self.save_dir / "predictions.json"), "w", encoding="utf-8") as f:
-                    LOGGER.info(f"Saving {f.name}...")
-                    json.dump(self.jdict, f)  # flatten and save
-                stats = self.eval_json(stats)  # update stats
             if self.args.plots or self.args.save_json:
                 LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
             return stats

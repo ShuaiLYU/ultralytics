@@ -90,7 +90,9 @@ class DetectionValidator(BaseValidator):
         )  # is COCO
         self.is_lvis = isinstance(val, str) and "lvis" in val and not self.is_coco  # is LVIS
         self.class_map = converter.coco80_to_coco91_class() if self.is_coco else list(range(1, len(model.names) + 1))
-        self.args.save_json |= self.args.val and (self.is_coco or self.is_lvis) and not self.training  # run final val
+        self.args.save_json |= self.args.coco_eval or (
+            self.args.val and (self.is_coco or self.is_lvis) and not self.training
+        )  # run final val, or every epoch when coco_eval is requested
         self.names = model.names
         self.nc = len(model.names)
         self.end2end = getattr(model, "end2end", False)
@@ -468,11 +470,16 @@ class DetectionValidator(BaseValidator):
             (dict[str, Any]): Updated statistics dictionary with COCO/LVIS evaluation results.
         """
         pred_json = self.save_dir / "predictions.json"  # predictions
-        anno_json = (
-            self.data["path"]
-            / "annotations"
-            / ("instances_val2017.json" if self.is_coco else f"lvis_v1_{self.args.split}.json")
-        )  # annotations
+        if self.args.coco_eval and not (self.is_coco or self.is_lvis):
+            anno_json = self.save_dir / f"gt_{self.args.split}.json"  # built once per run, reused every epoch
+            if not anno_json.exists():
+                converter.yolo2coco_gt(self.dataloader.dataset.labels, self.names, anno_json)
+        else:
+            anno_json = (
+                self.data["path"]
+                / "annotations"
+                / ("instances_val2017.json" if self.is_coco else f"lvis_v1_{self.args.split}.json")
+            )  # annotations
         return self.coco_evaluate(stats, pred_json, anno_json)
 
     def coco_evaluate(
@@ -501,7 +508,8 @@ class DetectionValidator(BaseValidator):
         Returns:
             (dict[str, Any]): Updated stats dictionary containing the computed COCO/LVIS evaluation metrics.
         """
-        if self.args.save_json and (self.is_coco or self.is_lvis) and len(self.jdict):
+        generic = self.args.coco_eval and not (self.is_coco or self.is_lvis)  # COCO-style eval on an arbitrary dataset
+        if self.args.save_json and (self.is_coco or self.is_lvis or generic) and len(self.jdict):
             LOGGER.info(f"\nEvaluating faster-coco-eval mAP using {pred_json} and {anno_json}...")
             try:
                 for x in pred_json, anno_json:
@@ -517,10 +525,22 @@ class DetectionValidator(BaseValidator):
                     val = COCOeval_faster(
                         anno, pred, iouType=iou_type, lvis_style=self.is_lvis, print_function=LOGGER.info
                     )
-                    val.params.imgIds = [int(Path(x).stem) for x in self.dataloader.dataset.im_files]  # images to eval
+                    stems = [Path(x).stem for x in self.dataloader.dataset.im_files]
+                    # match the ids pred_to_json emits, which keeps non-numeric filenames as strings
+                    val.params.imgIds = [int(s) if s.isnumeric() else s for s in stems]  # images to eval
                     val.evaluate()
                     val.accumulate()
                     val.summarize()
+
+                    if generic:
+                        # Additive only: native mAP columns and fitness stay untouched, so best.pt selection and the
+                        # training trajectory are identical to a coco_eval=False run.
+                        stats["metrics/mAP50(B-coco)"] = val.stats_as_dict["AP_50"]
+                        stats["metrics/mAP50-95(B-coco)"] = val.stats_as_dict["AP_all"]
+                        stats["metrics/mAP_small(B-coco)"] = val.stats_as_dict["AP_small"]
+                        stats["metrics/mAP_medium(B-coco)"] = val.stats_as_dict["AP_medium"]
+                        stats["metrics/mAP_large(B-coco)"] = val.stats_as_dict["AP_large"]
+                        continue
 
                     # update mAP50-95 and mAP50
                     stats[f"metrics/mAP50({suffix[i][0]})"] = val.stats_as_dict["AP_50"]

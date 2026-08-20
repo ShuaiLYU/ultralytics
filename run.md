@@ -340,3 +340,71 @@ which both arms lose identically because `nc=9`. Had the widened kernels failed 
   log. Pass `--py ultra` and redirect stdout yourself; `nohuppython` is what normally does both.
 - GPU capacity is set by residency, not job count: these runs measure ~25 GB each at `batch=128`, so a card
   already holding a 45 GB job fits one more, not two. Packing to 97% risks taking down the tenant.
+
+---
+
+# THE NOISE FLOOR
+
+`dspcbsd`, `yolo26n`, 100 epochs, `batch=128`, `imgsz=640`, snap `0ccb13883e94`, three seeds. Val
+mAP50-95 at the best epoch, i.e. the number `best.pt` corresponds to:
+
+| seed | best epoch | mAP50  | mAP50-95 |
+| ---- | ---------- | ------ | -------- |
+| 0    | 67         | 0.7875 | 0.4737   |
+| 1    | 83         | 0.8085 | 0.4802   |
+| 2    | 83         | 0.7985 | 0.4756   |
+
+**spread (max − min) = 0.0065** · mean 0.4765 · sd 0.0033 · **2sd = 0.0067**
+
+**Quote this: a change to YOLO26 on this benchmark is not a result below ~0.0067 mAP50-95.** Anything
+smaller is indistinguishable from re-running the same code with a different seed.
+
+The floor is tight, which is the useful outcome: real effects of 0.01 and up are measurable on a single
+seed per arm. It is also specific to `dspcbsd` — `3cad` and `tianchifabirc` have no seed replicates, so on
+those two a delta can only be reported as agreeing in direction, never as significant. If a change turns
+out to hinge on `3cad`, that is the moment to spend two more seeds there.
+
+Other baselines finished so far: `tianchifabirc` mAP50 0.4074, mAP50-95 0.1936 (best epoch 89).
+`3cad` still running.
+
+Outstanding for Phase A: test-split numbers, AP_small/medium/large, and full per-class tables via
+`eval_bench.py`. Not yet run.
+
+---
+
+# Phase B queue — second wave
+
+Snap **`bca283c87ec2`**; package code byte-identical to `20b6e886` and `0ccb13883`, so all of Phase B is
+comparable to the Phase A baselines. Launched on GPU 6 and 7 as the first baselines freed them.
+
+| run                             | dataset       | variable                    | GPU |
+| ------------------------------- | ------------- | --------------------------- | --- |
+| `3cad_z3_k6_n_s0`               | 3cad          | k=6 early downsampling      | 6   |
+| `dspcbsd_z7_imgsz960_n_s0`      | dspcbsd       | `imgsz=960` (ceiling probe) | 6   |
+| `3cad_z5_mosaic0_n_s0`          | 3cad          | `mosaic=0.0`                | 7   |
+| `tianchifabirc_z2_clspw05_n_s0` | tianchifabirc | `cls_pw=0.5`                | 7   |
+
+`3cad_z3_k6_n_s0` also reports `Transferred 606/708`, matching the baseline, so the widened kernels
+transferred there too.
+
+**Z5 (`mosaic=0.0`) reasoning.** Mosaic composes four images into one canvas and downscales them. On
+`3cad`, where 69% of boxes are under 0.1% of image area, that halves defects that are already at the limit
+of what P3 can resolve. This is a plain augmentation knob, no code, and it plausibly matters more than any
+architectural change on this data.
+
+**Z7 (`imgsz=960`) is a reference measurement, not a candidate.** It is the cheapest large lever on small
+objects, so it calibrates everything else: if raising resolution moves AP_small by 0.05 while every
+architectural change moves it by 0.005, the ablation programme's priorities are wrong. Measured 47.8 GiB at
+`batch=128`, so it needs a card mostly to itself.
+
+Still queued, not launched: Z2 on `dspcbsd`, Z3 on `tianchifabirc`, Z4 (P2 head, held by Louis), Z6
+(`scale=0.2`, mechanism overlaps Z5 — read Z5 first), and the dfl sweep beyond `dfl=0` (gated on Z1).
+
+## Two operational notes
+
+- `refs/louis/laptop-head` **vanished on ultra6** mid-session; `launch` failed with "cannot read HEAD" and
+  `bundle` recreated it from scratch (`remote_before: null`, 4836 commits). Running jobs were unaffected
+  because they execute from `--snap` worktrees, which is precisely the failure mode `--snap` exists for.
+- `lsta` reports the `k6_donor` utility job as **FAILED**. It succeeded; the classifier looks for
+  Ultralytics' training completion marker, which a non-training script never writes. Its log is the
+  authority.

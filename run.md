@@ -197,38 +197,87 @@ returns. Calling `DetectionValidator` directly is the only route to AP_small/med
 
 ---
 
-# Phase B prep — Z3 (space-to-depth downsampling), not yet launched
+# Phase B prep — Z3 (wide early downsampling), not yet launched
 
-`ultralytics/cfg/models/26/yolo26-spd.yaml`, commit `046bf4b2b`. Two lines differ from `yolo26.yaml`: the
-P1->P2 and P2->P3 stride-2 convs become `Focus`. No Python written — `Focus` already is SPD-Conv.
+**Superseded plan.** Z3 first used `Focus` as SPD-Conv (`yolo26-spd.yaml`, commit `046bf4b2b`, removed in
+`434f1bf44`). It now uses `Conv(k=6, s=2, p=2)` instead, because the two are the same operator and the
+conv form is strictly cheaper. The measurements that led there are kept below — they cost real work and
+they are the argument.
 
-The stem stays strided on purpose: it runs at full resolution, where quadrupling input channels costs
-most. Deeper downsamples feed large-object levels, where skipping pixels does not hurt small defects.
+## Why `Focus` was dropped: SPD-Conv is a 6x6 strided conv
+
+Space-to-depth splits a 2x2 neighbourhood into four sub-lattices, so a following 3x3 kernel reaches 3
+half-resolution positions x 2 sub-pixels = **6 original pixels per axis**: a 6x6 window at stride 2, with
+4C x 9 = **36 taps** per input channel. `Conv(k=6, s=2)` has the same window, stride, tap count, and
+parameter count. The two are related by a pure reindexing of the weights.
+
+Verified in `scripts/anomaly_bench/spd_equivalence.py` (float64):
+
+| claim                                                       | max abs diff |
+| ----------------------------------------------------------- | ------------ |
+| a stride-2 3x3 conv embeds exactly into `Focus(k=3)`        | 8.9e-15      |
+| `Conv(k=6,s=2)` == `Focus(k=3)` for arbitrary weights       | 2.8e-14      |
+| `Conv(k=6,s=2,p=2)` drop-in for `Conv(k=3,s=2)` after embed | 0.0          |
+
+So the design doc's premise for SPD-Conv — that it "discards no information", unlike a strided conv — does
+not distinguish it from the baseline in the way claimed. A 6x6 strided conv also reads all 36 pixels. The
+only thing Z3 actually changes against `Conv(k=3,s=2)` is **kernel 3 -> 6, taps 9 -> 36**. That is the
+hypothesis being tested, and it should be stated that way.
+
+This is also, on the arithmetic alone, why a 6x6 stride-2 conv is the sensible form: same function, one
+cuDNN kernel instead of four non-contiguous slices plus a concat plus a conv. (Whether that was the
+original YOLOv5 motivation for the same swap is not something we verified.)
 
 ## Cost, measured before spending GPU time
 
-|               | params            | CPU b=1 @640     |
-| ------------- | ----------------- | ---------------- |
-| `yolo26n`     | 2,572,280         | 45.2 ms          |
-| `yolo26n-spd` | 2,696,696 (+4.8%) | 50.9 ms (+12.6%) |
+|                                | params            | CPU b=1 @640     | ONNX                 |
+| ------------------------------ | ----------------- | ---------------- | -------------------- |
+| `yolo26n`                      | 2,572,280         | 45.2 ms          | —                    |
+| `yolo26n-spd` (`Focus`)        | 2,696,696 (+4.8%) | 50.9 ms (+12.6%) | +16 `Slice` nodes    |
+| `yolo26n-k6` (`Conv(k=6,s=2)`) | 2,696,696 (+4.8%) | not re-measured  | one `Conv` per layer |
 
-**Z3 is judged as a ratio, not a delta**: ΔAP_S against +12.6% CPU latency. YOLO26 is edge-first, so an
-AP_S gain that costs this much has to earn it.
+`Focus` costs +12.6% CPU latency for a function a plain conv computes, so the conv form removes a real
+tax rather than trading one cost for another.
 
-## Export verified
+## The plan as it now stands
 
-Trains (coco8, 2 epochs, CPU) and exports to ONNX; `onnx.checker` passes; confidences match torch to
-**3.8e-08**.
+`ultralytics/cfg/models/26/yolo26-k6.yaml` — two lines differ from `yolo26.yaml`: the P1->P2 and P2->P3
+downsampling convs become `Conv [c2, 6, 2, 2]`. `p=2` is mandatory; autopad gives `p=3` for `k=6` and
+changes the output size to `H/2 + 1`.
 
-Two things worth recording:
+The stem stays `k=3` on purpose: it runs at full resolution, where widening costs most. Deeper downsamples
+feed large-object levels, where a narrower kernel does not hurt small defects.
 
-- **Correction to the design doc: this does not export as a native ONNX `SpaceToDepth`.** `Focus`'s
-  slicing lowers to `Slice`+`Concat` — `Slice` count goes 2 -> 18, exactly 8 per `Focus`. Both are
-  standard ops requiring no plugin, so "export-clean" still holds, but not for the stated reason, and TRT
-  may not fuse it as tightly as a native `SpaceToDepth` node would.
+**The weight-transfer confound is removed, not accepted.** Widening a kernel leaves it with no same-shape
+counterpart in `yolo26n.pt`: 12 tensors and 166,274 parameters would start random, in the two earliest
+feature layers, while everything downstream stays pretrained. A negative result would then be
+uninterpretable — "wider kernel is worse" could not be separated from "losing pretrained early layers is
+worse". `scripts/anomaly_bench/make_k6_donor.py` embeds the pretrained 3x3 at `[1:4, 1:4]` of the 6x6
+window and zeroes the rest, which reproduces the original layer bit for bit:
+
+```bash
+python scripts/anomaly_bench/make_k6_donor.py --src yolo26n.pt --cfg yolo26n-k6.yaml \
+    --out /abs/path/yolo26n-k6.pt --check
+```
+
+Verified: 708/708 tensors, 2 kernels embedded, whole-model forward `max abs diff = 0.0` against
+`yolo26n.pt`, and the trainer reports `Transferred 708/708 items`. Z3 therefore starts from exactly the
+baseline, with the extra taps initialized as a no-op. Snapshots carry no untracked files, so the donor must
+be passed as an absolute path.
+
+## Two things worth recording
+
+- **`Focus` is legacy plumbing.** It is wired correctly (imported in `tasks.py`, in `base_modules` so width
+  scaling applies, exported from `nn.modules`) but **no shipped model yaml uses it**, and its only test is
+  one shape check. `Contract`, `Expand`, `PixelUnshuffle` and `SpaceToDepth` do not exist in this
+  repository, so the commented-out `Contract(gain=2)` line inside `Focus` points at a deleted module. Two
+  traps if it is ever used: the default `k=1` makes it a 1x1 conv over the 4x-channel tensor, losing the
+  spatial mixing entirely, and a third positional arg sets the inner conv's stride on top of the /2 the
+  slicing already did.
 - **Do not compare end2end outputs element-wise.** The `(1, 300, 6)` NMS-free tensor is confidence-sorted,
   so tiny numerical differences permute tied low-confidence rows and produce a max-abs-diff of ~288 on a
   model that is in fact correct. Compare sorted confidences, or only detections above a threshold.
 
-Export sanity is not a footnote here: it is the entire reason SPD was chosen over deformable conv and
-window attention, both of which reintroduce the export friction YOLO26 deliberately removed.
+`Focus`'s ONNX graph did not contain a native `SpaceToDepth`; its slicing lowered to `Slice`+`Concat`
+(`Slice` count 2 -> 18, exactly 8 per `Focus`). Both are standard ops needing no plugin, so the design
+doc's "export-clean" conclusion held, but not for the stated reason. Moot now that the conv form is used.

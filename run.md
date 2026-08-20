@@ -136,3 +136,43 @@ Together with the COCO-vs-native agreement above, the val boxes are sound.
 with zero boxes, so it looks clean while proving nothing. `3cad` val is 57% normal images and the val
 dataloader runs `rect=True`, which sorts by aspect ratio and clusters similar images into the same batch.
 Use a train batch, or a later val batch.
+
+---
+
+# Phase A — baselines and noise floor
+
+Snap commit **`0ccb13883e94`** · weight `yolo26n.pt` · `batch=128` · `epochs=100` · `imgsz=640` ·
+`coco_eval=True`. Launched 2026-08-20 10:02-10:04 UTC. Names carry `_n` for the model scale, since the
+scale differs from the one TASK.md specified.
+
+Five runs, all launched concurrently. `yolo26n` at `batch=128` measures **~24 GB**, so several fit on one
+96 GB card: GPU 6 held 3 jobs at 74.7 GB, GPU 7 held 2 at 50.8 GB.
+
+**The three `dspcbsd` seeds share one GPU on purpose.** They are the noise-floor measurement, so their
+conditions must be identical; splitting them across cards with different co-tenants would put a second
+variable into a variance estimate. `deterministic: True` is the Ultralytics default, so co-tenancy affects
+speed but not numerics.
+
+```bash
+EXP=/Users/louis/workspace/ultra_louis_work/expman/.venv/bin/expman-cli
+
+$EXP bundle
+
+# GPU 6 — noise floor, identical conditions
+for s in 0 1 2; do
+  $EXP launch --snap --args "nohupyolo 0 train data=/data/shared-datasets/louis_data/anomaly_bench/dspcbsd/data.yaml model=yolo26n.pt epochs=100 imgsz=640 batch=128 seed=$s device=6 coco_eval=True project=yolo26-defect-bench name=dspcbsd_baseline_n_s$s"
+done
+
+# GPU 7 — the other two baselines
+$EXP launch --snap --args "nohupyolo 0 train data=/data/shared-datasets/louis_data/anomaly_bench/3cad/data.yaml model=yolo26n.pt epochs=100 imgsz=640 batch=128 seed=0 device=7 coco_eval=True project=yolo26-defect-bench name=3cad_baseline_n_s0"
+
+$EXP launch --snap --args "nohupyolo 0 train data=/data/shared-datasets/louis_data/anomaly_bench/tianchifabirc/data.yaml model=yolo26n.pt epochs=100 imgsz=640 batch=128 seed=0 device=7 coco_eval=True project=yolo26-defect-bench name=tianchifabirc_baseline_n_s0"
+```
+
+Dataset yamls: `/data/shared-datasets/louis_data/anomaly_bench/{3cad,tianchifabirc,dspcbsd}/data.yaml`.
+
+Status: **running.** `dspcbsd` 52 train batches/epoch at ~1.5 it/s. Results, per-class tables, the test
+split numbers and the noise floor go here when they finish.
+
+`batch=128` is now fixed for every later ablation on this branch — a change measured against these
+baselines cannot also change the batch size.

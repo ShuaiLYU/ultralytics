@@ -176,3 +176,41 @@ split numbers and the noise floor go here when they finish.
 
 `batch=128` is now fixed for every later ablation on this branch — a change measured against these
 baselines cannot also change the batch size.
+
+---
+
+# Phase B prep — Z3 (space-to-depth downsampling), not yet launched
+
+`ultralytics/cfg/models/26/yolo26-spd.yaml`, commit `046bf4b2b`. Two lines differ from `yolo26.yaml`: the
+P1->P2 and P2->P3 stride-2 convs become `Focus`. No Python written — `Focus` already is SPD-Conv.
+
+The stem stays strided on purpose: it runs at full resolution, where quadrupling input channels costs
+most. Deeper downsamples feed large-object levels, where skipping pixels does not hurt small defects.
+
+## Cost, measured before spending GPU time
+
+|               | params            | CPU b=1 @640     |
+| ------------- | ----------------- | ---------------- |
+| `yolo26n`     | 2,572,280         | 45.2 ms          |
+| `yolo26n-spd` | 2,696,696 (+4.8%) | 50.9 ms (+12.6%) |
+
+**Z3 is judged as a ratio, not a delta**: ΔAP_S against +12.6% CPU latency. YOLO26 is edge-first, so an
+AP_S gain that costs this much has to earn it.
+
+## Export verified
+
+Trains (coco8, 2 epochs, CPU) and exports to ONNX; `onnx.checker` passes; confidences match torch to
+**3.8e-08**.
+
+Two things worth recording:
+
+- **Correction to the design doc: this does not export as a native ONNX `SpaceToDepth`.** `Focus`'s
+  slicing lowers to `Slice`+`Concat` — `Slice` count goes 2 -> 18, exactly 8 per `Focus`. Both are
+  standard ops requiring no plugin, so "export-clean" still holds, but not for the stated reason, and TRT
+  may not fuse it as tightly as a native `SpaceToDepth` node would.
+- **Do not compare end2end outputs element-wise.** The `(1, 300, 6)` NMS-free tensor is confidence-sorted,
+  so tiny numerical differences permute tied low-confidence rows and produce a max-abs-diff of ~288 on a
+  model that is in fact correct. Compare sorted confidences, or only detections above a threshold.
+
+Export sanity is not a footnote here: it is the entire reason SPD was chosen over deformable conv and
+window attention, both of which reintroduce the export friction YOLO26 deliberately removed.

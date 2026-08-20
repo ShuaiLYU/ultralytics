@@ -115,14 +115,24 @@ per-dataset tercile split needed.
   the integer-id fix; `3cad` failed with `invalid literal for int(): '3cad-aluminum-pc__train_good_000126'`),
   `smoke_tianchifabirc_n` (zero predictions).
 
-### Open item — needs Louis
+### Polygon-to-box derivation on `3cad` — checked, passes
 
-`3cad` is yolo-seg polygons trained as `task=detect`, so Ultralytics derives the boxes. Visual check is
-**not done by me**; images pulled and opened for review:
+`3cad` carries yolo-seg polygons but trains as `task=detect`, so Ultralytics derives the boxes. The
+failure mode to rule out is a box covering the whole part instead of the defect.
 
-```
-expman/data/pulled/yolo26-defect-bench/smoke_3cad_n_v2/train_batch0.jpg
-expman/data/pulled/yolo26-defect-bench/smoke_3cad_n_v2/val_batch0_labels.jpg
-```
+Visual, `train_batch0.jpg`: boxes sit on defects, not on parts. No box spans a part or an image. Class 18
+appears as long thin horizontal strips a few tens of px tall and hundreds wide, hugging scratch lines;
+classes 3 and 19 are small localized squares. Classes 2, 20 and 14 draw large area-covering boxes, which
+is correct for diffuse defect types (bruise, bright_shadow, uneven) rather than a derivation error.
+Note the tiles are mosaics of 4 images each, so the filename in a tile title does not identify which
+image a given box belongs to.
 
-Phase A is gated on this check.
+Numeric, val side (unaugmented, and what the metric is computed on): if the derivation produced
+part-sized boxes, every GT box would fall in the `large` band. `AP_small` and `AP_medium` both return a
+real value (`0.0000`) rather than COCO's `-1.000` empty-band sentinel, so small and medium GT boxes exist.
+Together with the COCO-vs-native agreement above, the val boxes are sound.
+
+**Pitfall: do not use `val_batch0_labels.jpg` for this check on `3cad`.** All 16 tiles are `_good_` images
+with zero boxes, so it looks clean while proving nothing. `3cad` val is 57% normal images and the val
+dataloader runs `rect=True`, which sorts by aspect ratio and clusters similar images into the same batch.
+Use a train batch, or a later val batch.

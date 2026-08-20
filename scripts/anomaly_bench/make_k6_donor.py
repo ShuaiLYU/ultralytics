@@ -102,6 +102,7 @@ def main() -> None:
     p.add_argument("--cfg", default="yolo26n-k6.yaml", help="model yaml with widened downsampling convs")
     p.add_argument("--out", default="yolo26n-k6.pt", help="destination checkpoint")
     p.add_argument("--check", action="store_true", help="verify the donor matches the source forward pass")
+    p.add_argument("name", nargs="?", help="ignored; expman-cli refuses to launch args without a name= token")
     a = p.parse_args()
 
     path, kept, embedded = build(a.src, a.cfg, a.out)

@@ -364,6 +364,7 @@ class v8DetectionLoss:
         if self.class_weights is not None:
             self.class_weights = self.class_weights.to(device).view(1, 1, -1)
 
+        # E2ELoss builds one v8DetectionLoss per head, so these knobs reach both the one2many and one2one assigners
         self.assigner = TaskAlignedAssigner(
             topk=tal_topk,
             num_classes=self.nc,
@@ -371,6 +372,11 @@ class v8DetectionLoss:
             beta=6.0,
             stride=self.stride.tolist(),
             topk2=tal_topk2,
+            min_side=h.tal_min_side,
+            prior=h.tal_prior,
+            rf_scale=h.tal_rf_scale,
+            metric=h.tal_metric,
+            nwd_gamma=h.tal_nwd_gamma,
         )
         self.bbox_loss = BboxLoss(m.reg_max, inner_ratio=h.inner_ratio).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
@@ -433,6 +439,7 @@ class v8DetectionLoss:
             gt_labels,
             gt_bboxes,
             mask_gt,
+            stride_tensor,
         )
 
         target_scores_sum = max(target_scores.sum(), 1)

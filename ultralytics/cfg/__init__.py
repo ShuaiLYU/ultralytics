@@ -206,6 +206,9 @@ CFG_FLOAT_KEYS = frozenset(
         "cls",
         "dfl",
         "inner_ratio",
+        "tal_min_side",
+        "tal_rf_scale",
+        "tal_nwd_gamma",
         "pose",
         "kobj",
         "rle",
@@ -311,7 +314,7 @@ CFG_BOOL_KEYS = frozenset(
         "cls_remap",
     }
 )
-CFG_STR_KEYS = frozenset({"optimizer", "split", "copy_paste_mode", "auto_augment"})
+CFG_STR_KEYS = frozenset({"optimizer", "split", "copy_paste_mode", "auto_augment", "tal_prior", "tal_metric"})
 
 
 def cfg2dict(cfg: str | Path | dict | SimpleNamespace) -> dict:

@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from . import LOGGER
-from .metrics import bbox_iou, probiou
+from .metrics import bbox_iou, bbox_nwd, probiou
 from .ops import xywh2xyxy, xywhr2xyxyxyxy, xyxy2xywh
 from .torch_utils import TORCH_1_11
 
@@ -25,6 +25,11 @@ class TaskAlignedAssigner(nn.Module):
         beta (float): The beta parameter for the localization component of the task-aligned metric.
         stride (list): List of stride values for different feature levels.
         stride_val (int): The stride value used for select_candidates_in_gts.
+        min_side (float | None): Floor applied to ground truth sides before the centre-inside-GT test.
+        prior (str): Candidate prior, 'inside' for the centre-inside-GT test or 'rfla' for receptive-field ranking.
+        rf_scale (float): Receptive-field side, in strides, used by the 'rfla' prior.
+        metric (str): Localization metric, 'ciou' or 'nwd'.
+        nwd_gamma (float): Normalizing-scale multiplier for the Normalized Wasserstein similarity.
         eps (float): A small value to prevent division by zero.
     """
 
@@ -37,6 +42,11 @@ class TaskAlignedAssigner(nn.Module):
         stride: list | None = None,
         eps: float = 1e-9,
         topk2=None,
+        min_side: float | None = None,
+        prior: str = "inside",
+        rf_scale: float = 1.0,
+        metric: str = "ciou",
+        nwd_gamma: float = 1.0,
     ):
         """Initialize a TaskAlignedAssigner object with customizable hyperparameters.
 
@@ -48,6 +58,14 @@ class TaskAlignedAssigner(nn.Module):
             stride (list, optional): List of stride values for different feature levels.
             eps (float, optional): A small value to prevent division by zero.
             topk2 (int, optional): Secondary topk value for additional filtering.
+            min_side (float, optional): Monotone floor, in pixels, on ground truth sides before the
+                centre-inside-GT test. None keeps the legacy two-branch clamp described in
+                `select_candidates_in_gts`.
+            prior (str, optional): 'inside' keeps the centre-inside-GT test, 'rfla' ranks anchors by receptive-field
+                distance instead so that no ground truth can be starved of candidates.
+            rf_scale (float, optional): Receptive-field side, in units of the anchor's stride, for the 'rfla' prior.
+            metric (str, optional): 'ciou' or 'nwd' for the localization half of the task-aligned metric.
+            nwd_gamma (float, optional): Normalizing-scale multiplier passed to `bbox_nwd`.
         """
         super().__init__()
         self.topk = topk
@@ -57,10 +75,15 @@ class TaskAlignedAssigner(nn.Module):
         self.beta = beta
         self.stride = stride if stride is not None else [8, 16, 32]
         self.stride_val = self.stride[1] if len(self.stride) > 1 else self.stride[0]
+        self.min_side = min_side
+        self.prior = prior
+        self.rf_scale = rf_scale
+        self.metric = metric
+        self.nwd_gamma = nwd_gamma
         self.eps = eps
 
     @torch.no_grad()
-    def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
+    def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt, anc_strides=None):
         """Compute the task-aligned assignment.
 
         Args:
@@ -70,6 +93,8 @@ class TaskAlignedAssigner(nn.Module):
             gt_labels (torch.Tensor): Ground truth labels with shape (bs, n_max_boxes, 1).
             gt_bboxes (torch.Tensor): Ground truth boxes with shape (bs, n_max_boxes, 4).
             mask_gt (torch.Tensor): Mask for valid ground truth boxes with shape (bs, n_max_boxes, 1).
+            anc_strides (torch.Tensor, optional): Per-anchor stride with shape (num_total_anchors, 1). Required by
+                the 'rfla' prior, which sizes each anchor's receptive field from it.
 
         Returns:
             target_labels (torch.Tensor): Target labels with shape (bs, num_total_anchors).
@@ -94,18 +119,19 @@ class TaskAlignedAssigner(nn.Module):
                 torch.zeros_like(pd_scores[..., 0]),
             )
 
+        args = (pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt, anc_strides)
         try:
-            return self._forward(pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)
+            return self._forward(*args)
         except RuntimeError as e:
             if "out of memory" not in str(e).lower():
                 raise
         # Recover outside the except block: exiting it drops e.__traceback__, releasing the failed attempt's GPU
         # intermediates back to the allocator so the copy-back below can succeed
         LOGGER.warning("CUDA OutOfMemoryError in TaskAlignedAssigner, using CPU")
-        result = self._forward(*(t.cpu() for t in (pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)))
+        result = self._forward(*(t.cpu() if t is not None else t for t in args))
         return tuple(t.to(device) for t in result)
 
-    def _forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
+    def _forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt, anc_strides=None):
         """Compute the task-aligned assignment.
 
         Args:
@@ -124,7 +150,7 @@ class TaskAlignedAssigner(nn.Module):
             target_gt_idx (torch.Tensor): Target ground truth indices with shape (bs, num_total_anchors).
         """
         mask_pos, align_metric, overlaps = self.get_pos_mask(
-            pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt
+            pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt, anc_strides
         )
 
         target_gt_idx, fg_mask, mask_pos = self.select_highest_overlaps(
@@ -143,7 +169,7 @@ class TaskAlignedAssigner(nn.Module):
 
         return target_labels, target_bboxes, target_scores, fg_mask.bool(), target_gt_idx
 
-    def get_pos_mask(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt):
+    def get_pos_mask(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt, anc_strides=None):
         """Get positive mask for each ground truth box.
 
         Args:
@@ -153,13 +179,17 @@ class TaskAlignedAssigner(nn.Module):
             gt_bboxes (torch.Tensor): Ground truth boxes with shape (bs, n_max_boxes, 4).
             anc_points (torch.Tensor): Anchor points with shape (num_total_anchors, 2).
             mask_gt (torch.Tensor): Mask for valid ground truth boxes with shape (bs, n_max_boxes, 1).
+            anc_strides (torch.Tensor, optional): Per-anchor stride with shape (num_total_anchors, 1).
 
         Returns:
             mask_pos (torch.Tensor): Positive mask with shape (bs, max_num_obj, h*w).
             align_metric (torch.Tensor): Alignment metric with shape (bs, max_num_obj, h*w).
             overlaps (torch.Tensor): Overlaps between predicted vs ground truth boxes with shape (bs, max_num_obj, h*w).
         """
-        mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
+        if self.prior == "rfla":
+            mask_in_gts = self.select_candidates_by_rfd(anc_points, anc_strides, gt_bboxes, mask_gt)
+        else:
+            mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
         # Get anchor_align metric, (b, max_num_obj, h*w)
         align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
         # Get topk_metric mask, (b, max_num_obj, h*w)
@@ -209,7 +239,15 @@ class TaskAlignedAssigner(nn.Module):
 
         Returns:
             (torch.Tensor): IoU values between each pair of boxes.
+
+        Notes:
+            This drives three things at once: which anchors win the top-k, which ground truth claims a contested
+            anchor, and -- through `pos_overlaps` in `_forward` -- the magnitude of the soft classification target.
+            CIoU is intrinsically scale-biased, so a small object's best achievable value is low and its soft label
+            is capped low with it; `metric='nwd'` removes that bias by normalizing on the ground truth's own scale.
         """
+        if self.metric == "nwd":
+            return bbox_nwd(pd_bboxes, gt_bboxes, gamma=self.nwd_gamma).squeeze(-1)
         return bbox_iou(gt_bboxes, pd_bboxes, xywh=False, CIoU=True).squeeze(-1).clamp_(0)
 
     def select_topk_candidates(self, metrics, topk_mask=None):
@@ -295,18 +333,50 @@ class TaskAlignedAssigner(nn.Module):
         Notes:
             - b: batch size, n_boxes: number of ground truth boxes, h: height, w: width.
             - Bounding box format: [x_min, y_min, x_max, y_max].
+            - The legacy clamp (`min_side=None`) is not monotone: a side below `stride[0]` jumps all the way to
+              `stride_val`, while a side just above `stride[0]` is left alone, so the [stride[0], stride_val) band
+              recruits fewer anchors than the band below it. Setting `min_side` replaces it with a plain floor.
         """
         gt_bboxes_xywh = xyxy2xywh(gt_bboxes)
-        wh_mask = gt_bboxes_xywh[..., 2:] < self.stride[0]  # the smallest stride
-        gt_bboxes_xywh[..., 2:] = torch.where(
-            (wh_mask * mask_gt).bool(),
-            torch.tensor(self.stride_val, dtype=gt_bboxes_xywh.dtype, device=gt_bboxes_xywh.device),
-            gt_bboxes_xywh[..., 2:],
+        wh = gt_bboxes_xywh[..., 2:]
+        floored = (
+            wh.clamp(min=self.min_side)
+            if self.min_side
+            else torch.where(
+                wh < self.stride[0],  # the smallest stride
+                torch.tensor(self.stride_val, dtype=wh.dtype, device=wh.device),
+                wh,
+            )
         )
+        gt_bboxes_xywh[..., 2:] = torch.where(mask_gt.bool(), floored, wh)
         gt_bboxes = xywh2xyxy(gt_bboxes_xywh)
 
         lt, rb = gt_bboxes.unsqueeze(2).chunk(2, 3)  # (b, n_boxes, 1, 2) left-top, right-bottom
         return ((xy_centers - lt > eps) & (rb - xy_centers > eps)).all(3)
+
+    def select_candidates_by_rfd(self, xy_centers, anc_strides, gt_bboxes, mask_gt):
+        """Select each ground truth's candidate anchors by receptive-field distance (RFLA, arXiv:2208.08738).
+
+        Every anchor is modelled as the Gaussian of its receptive field -- a box of side `rf_scale * stride`
+        centred on the anchor -- and scored against the ground truth Gaussian with `bbox_nwd`. The best `topk`
+        anchors are kept for every ground truth no matter where its centre falls, so unlike the centre-inside-GT
+        test this prior cannot starve an object smaller than one cell; the size term in the Wasserstein distance
+        is what still sends large objects to the coarse levels.
+
+        Args:
+            xy_centers (torch.Tensor): Anchor center coordinates, shape (h*w, 2).
+            anc_strides (torch.Tensor): Per-anchor stride, shape (h*w, 1).
+            gt_bboxes (torch.Tensor): Ground truth bounding boxes, shape (b, n_boxes, 4).
+            mask_gt (torch.Tensor): Mask for valid ground truth boxes, shape (b, n_boxes, 1).
+
+        Returns:
+            (torch.Tensor): Candidate mask of shape (b, n_boxes, h*w) with exactly `topk` anchors per valid GT.
+        """
+        rf = anc_strides * (self.rf_scale / 2)  # (h*w, 1) half receptive-field side
+        anc_bboxes = torch.cat((xy_centers - rf, xy_centers + rf), -1)  # (h*w, 4) in xyxy
+        rfd = bbox_nwd(anc_bboxes, gt_bboxes.unsqueeze(2), gamma=self.nwd_gamma).squeeze(-1)  # (b, n_boxes, h*w)
+        mask = torch.zeros_like(rfd).scatter_(-1, rfd.topk(self.topk, dim=-1).indices, 1.0)
+        return mask * mask_gt  # padded GTs always rank some anchor first, so drop their picks
 
     def select_highest_overlaps(self, mask_pos, overlaps, n_max_boxes, align_metric):
         """Select anchor boxes with highest IoU when assigned to multiple ground truths.

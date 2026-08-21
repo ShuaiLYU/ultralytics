@@ -185,6 +185,40 @@ def bbox_iou(
     return iou  # IoU
 
 
+def bbox_nwd(
+    box1: torch.Tensor, box2: torch.Tensor, xywh: bool = False, gamma: float = 1.0, eps: float = 1e-7
+) -> torch.Tensor:
+    """Calculate the Normalized Wasserstein similarity between bounding boxes.
+
+    Each box becomes the Gaussian N(center, diag((w/2)^2, (h/2)^2)), for which the squared 2-Wasserstein distance
+    has the closed form ||dcenter||^2 + ((w1-w2)/2)^2 + ((h1-h2)/2)^2 (arXiv:2110.13389). The distance is
+    normalized by the scale of `box2` instead of a dataset-wide constant, which makes the result scale-invariant:
+    a tiny box and a large box that are equally misplaced relative to their own size score the same, whereas IoU
+    would rate the tiny pair far lower. Broadcasting follows `bbox_iou`, and the trailing dimension is kept.
+
+    Args:
+        box1 (torch.Tensor): A tensor representing one or more bounding boxes, with the last dimension being 4.
+        box2 (torch.Tensor): Reference boxes, with the last dimension being 4. Their scale sets the normalizer, so
+            this is the ground truth when comparing predictions or receptive fields against it.
+        xywh (bool, optional): If True, input boxes are in (x, y, w, h) format, else (x1, y1, x2, y2).
+        gamma (float, optional): Multiplier on the normalizing scale. Above 1.0 flattens the similarity, below 1.0
+            sharpens it.
+        eps (float, optional): A small value to avoid division by zero.
+
+    Returns:
+        (torch.Tensor): Similarity in (0, 1], 1.0 for identical boxes.
+    """
+    if xywh:
+        (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
+    else:
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
+        x1, y1, w1, h1 = (b1_x1 + b1_x2) / 2, (b1_y1 + b1_y2) / 2, b1_x2 - b1_x1, b1_y2 - b1_y1
+        x2, y2, w2, h2 = (b2_x1 + b2_x2) / 2, (b2_y1 + b2_y2) / 2, b2_x2 - b2_x1, b2_y2 - b2_y1
+    w2sq = (x1 - x2).pow(2) + (y1 - y2).pow(2) + ((w1 - w2) / 2).pow(2) + ((h1 - h2) / 2).pow(2)
+    return torch.exp(-w2sq.clamp(0).sqrt() / (gamma * (w2 * h2).clamp(0).sqrt() + eps))
+
+
 def mask_iou(mask1: torch.Tensor, mask2: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
     """Calculate masks IoU.
 

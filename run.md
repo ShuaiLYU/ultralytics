@@ -912,13 +912,29 @@ values, not just deltas. `sd` is across seeds; `n/a` means a single seed, which 
 | `960`       | 1   | 7.01   | 0.3132     | n/a    | +0.0224     | **0.2827** | n/a    | **+0.0902** |
 | `k=6`+`960` | 1   | 9.40   | **0.3254** | n/a    | **+0.0346** | 0.2470     | n/a    | +0.0545     |
 
-**dspcbsd** — near saturation, everything is small
+**dspcbsd** — near saturation, everything is small. **`960` now has 3 seeds and its single-seed number was
+the optimistic draw**, exactly the failure mode this section warned about.
 
-| arm      | n   | GFLOPs | mAP50-95   | sd     | Δ           | AP_small   | sd     | Δ           |
-| -------- | --- | ------ | ---------- | ------ | ----------- | ---------- | ------ | ----------- |
-| baseline | 3   | 3.04   | 0.4765     | 0.0033 | --          | 0.3985     | 0.0008 | --          |
-| `k=6`    | 3   | 4.10   | 0.4797     | 0.0019 | +0.0032     | 0.4026     | 0.0027 | +0.0041     |
-| `960`    | 1   | 7.01   | **0.4831** | n/a    | **+0.0066** | **0.4057** | n/a    | **+0.0072** |
+| arm      | n   | GFLOPs | mAP50-95   | sd         | Δ       | AP_small   | sd         | Δ       |
+| -------- | --- | ------ | ---------- | ---------- | ------- | ---------- | ---------- | ------- |
+| baseline | 3   | 3.04   | 0.4765     | 0.0033     | --      | 0.3985     | 0.0008     | --      |
+| `k=6`    | 3   | 4.10   | **0.4797** | 0.0019     | +0.0032 | 0.4026     | 0.0027     | +0.0041 |
+| `960`    | 3   | 7.01   | 0.4788     | **0.0056** | +0.0023 | **0.4049** | **0.0115** | +0.0064 |
+
+`960` seeds: mAP50-95 0.4831 / 0.4807 / 0.4725, AP_small 0.4057 / 0.4159 / 0.3930. The s0 draw used earlier
+(0.4831 / 0.4057) sat at the top of both ranges, and with the other two seeds in, **`960`'s mAP50-95 mean
+falls below `k=6`'s.** Welch, all three arms at n=3:
+
+| comparison        | ΔmAP50-95 | p      | ΔAP_small | p      |
+| ----------------- | --------- | ------ | --------- | ------ |
+| `k=6` vs baseline | +0.0032   | 0.2434 | +0.0041   | 0.1049 |
+| `960` vs baseline | +0.0023   | 0.5861 | +0.0064   | 0.4381 |
+| `960` vs `k=6`    | -0.0009   | 0.8082 | +0.0022   | 0.7720 |
+
+**Nothing clears on dspcbsd, and `960` is statistically indistinguishable from `k=6` there (p = 0.77-0.81).**
+The reason is variance, not the mean: `960`'s AP_small seed sd is **0.0115, fourteen times the baseline's
+0.0008** and four times `k=6`'s. Both interventions inflate run-to-run spread on this dataset, and `960`
+inflates it far more.
 
 **tianchifabirc** — `960` still queued, no combination run
 
@@ -983,6 +999,36 @@ $EXP launch --snap --args "nohupyolo --after dspcbsd_z7_imgsz960_n_s2 train data
 After this, `baseline` / `k=6` / `960` are all n=3 on both dspcbsd and 3cad, so "`k=6` vs `960`" becomes a
 Welch test between two replicated arms instead of a mean against a point. Code comparability across the
 M1/M3 commit boundary is the same coco8 bit-identical A/B proven for Phase C.
+
+## expman's `status` field is not evidence — check the process and the CSV
+
+A status audit during this wave found **three of the six supplementary runs mislabelled at once**:
+
+| run                              | expman said | actually                                      |
+| -------------------------------- | ----------- | --------------------------------------------- |
+| `3cad_z3xz7_k6_imgsz960_n_s1`    | failed      | **running** — PID 3530124 on GPU 6, log live  |
+| `tianchifabirc_z7_imgsz960_n_s0` | failed      | **running** — PID 3531054 on GPU 7, log live  |
+| `dspcbsd_z7_imgsz960_n_s2`       | running     | **completed** — 100 epochs, best.pt + last.pt |
+| `k6_donor`                       | failed      | completed (known: writes no training marker)  |
+
+Both "failed" runs were launched with `--after`, so while the waiter was queued there was no process
+carrying the run name for expman to match, and it recorded a failure. The status never corrected once they
+started. This is the same class of bug as `3cad_z3_k6_n_s2` above, where a healthy run parsed to empty
+`train_metrics`.
+
+**Rule: never conclude a run failed from expman alone.** The two cheap checks that settle it:
+
+```bash
+R=/home/louis/ultra_louis_work/ultralytics/runs/yolo26-defect-bench
+# 1. is a process actually carrying this run name?
+ssh ultra6 "nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader"
+ssh ultra6 'for p in <pids>; do tr "\0" " " < /proc/$p/cmdline | grep -oE "name=[^ ]+"; done'
+# 2. did it finish? 101 rows = header + 100 epochs, and both weights present
+ssh ultra6 "wc -l < $R/<name>/results.csv; ls $R/<name>/weights/"
+```
+
+A genuinely dead run shows a log that stops mid-epoch with no traceback. Here both suspects had logs being
+written to the same second the audit ran, which is what exposed the mislabel.
 
 ## Two operational notes from this wave
 
@@ -1060,8 +1106,8 @@ column is a significance claim until `tianchifabirc_baseline_n_s1/_s2` land.
 | `3cad_z3xz7_k6_imgsz960_n_s0`    | 3cad          | `k=6` + `960`     | completed | 0.3254   | 0.2470 | --     | --                 | best 3cad mAP50-95 so far               |
 | `3cad_z7_imgsz960_n_s1`          | 3cad          | `imgsz=960` s1    | running   | --       | --     | --     | --                 | running                                 |
 | `3cad_z7_imgsz960_n_s2`          | 3cad          | `imgsz=960` s2    | running   | --       | --     | --     | --                 | running                                 |
-| `dspcbsd_z7_imgsz960_n_s1`       | dspcbsd       | `imgsz=960` s1    | running   | --       | --     | --     | --                 | running                                 |
-| `dspcbsd_z7_imgsz960_n_s2`       | dspcbsd       | `imgsz=960` s2    | running   | --       | --     | --     | --                 | running                                 |
+| `dspcbsd_z7_imgsz960_n_s1`       | dspcbsd       | `imgsz=960` s1    | completed | 0.4807   | 0.4159 | 0.5581 | --                 | completed                               |
+| `dspcbsd_z7_imgsz960_n_s2`       | dspcbsd       | `imgsz=960` s2    | completed | 0.4725   | 0.3930 | 0.5565 | --                 | completed                               |
 | `3cad_z3xz7_k6_imgsz960_n_s1`    | 3cad          | `k=6` + `960` s1  | queued    | --       | --     | --     | --                 | queued (GPU 6)                          |
 | `tianchifabirc_z7_imgsz960_n_s0` | tianchifabirc | `imgsz=960`       | queued    | --       | --     | --     | --                 | queued (GPU 7)                          |
 | `tianchifabirc_baseline_n_s1`    | tianchifabirc | baseline seed 1   | completed | 0.1891   | 0.1173 | 0.1782 | --                 | baseline                                |

@@ -711,6 +711,38 @@ stride/resolution. Z4 is held by Louis.
 
 Two probes kept, both CPU-only and both reusable: `scripts/anomaly_bench/nms_probe.py` and `scripts/anomaly_bench/anchor_pool.py`.
 
+## Starvation does not explain `k=6`'s sign — aspect ratio does
+
+Extending the pool measurement to the third dataset breaks the tidy version of the story above:
+
+| dataset       | median pool @640 | starved (<10) | AR median | AR p90 | AR >= 5 | min side < 6px @640 | `k=6` ΔAP_S |
+| ------------- | ---------------- | ------------- | --------- | ------ | ------- | ------------------- | ----------- |
+| dspcbsd       | 55               | 6.7%          | 1.25      | 2.50   | 2.3%    | 0.0%                | +4.0×       |
+| 3cad          | 7                | 55.0%         | 1.90      | 6.95   | 15.1%   | 8.7%                | +19.0×      |
+| tianchifabirc | 6                | 55.5%         | 5.16      | 52.83  | 51.1%   | 31.1%               | -4.1×       |
+
+`3cad` and `tianchifabirc` are **equally starved** (55.0% vs 55.5%, median pool 7 vs 6), yet `k=6` is the
+branch's largest architectural win on one and a loss on the other. So starvation predicts _whether loss-side
+knobs are reachable at all_, but it does **not** predict `k=6`'s sign.
+
+Aspect ratio does. `tianchifabirc` defects are extreme slivers — median AR 5.16, p90 **52.8**, and **31.1% of
+boxes have a side thinner than 6 px at `imgsz=640`, i.e. thinner than the `k=6` window itself**. A square 6x6
+kernel averages across the thin dimension of a defect that is 2 px wide, which is exactly the signal that
+matters. On `3cad` (8.7% thin) and `dspcbsd` (0.0% thin) there is almost nothing for it to smear.
+
+Leading hypothesis, **not established**: `k=6` helps when the widened window still fits inside the defect and
+hurts when it does not. The controlled test would be an anisotropic stem (`k=(6,3)` / `k=(3,6)`) on
+`tianchifabirc`; a square-kernel sweep cannot separate "wider window" from "wider than the target".
+
+Measured with the same probe:
+
+```bash
+P=/Users/louis/workspace/ultra_louis_work/expman/data/pulled/yolo26-defect-bench
+for d in 3cad dspcbsd tianchifabirc; do
+  python scripts/anomaly_bench/anchor_pool.py $P/${d}_baseline_n_s0/gt_val.json --imgsz 640
+done
+```
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status

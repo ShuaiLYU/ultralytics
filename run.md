@@ -542,3 +542,74 @@ worth knowing before spending runs on architecture there.
 - **M1 (Inner-IoU) and M3 (o2o `topk2`) are next**, being cheap and independent of Z1.
 - `3cad` seeds 1 and 2 launched, because the two largest signals on the board (Z1 +8.1x, Z3 +19.0x
   AP_small) are both on the one dataset with no replicates, so neither can be called significant yet.
+
+---
+
+# Phase B — M1 and M3 launched (first runs on modified loss code)
+
+Snap **`acbc98561`**. Two new knobs, both defaulting to current behaviour so a default run is unchanged by
+construction. The package diff against the baseline snapshot `bca283c87` is 28 insertions across
+`cfg/__init__.py`, `cfg/default.yaml`, `utils/loss.py`, `utils/metrics.py` — nothing else is touched, and
+at their defaults neither knob has a live code path.
+
+| knob          | default | what it does                                                                                                                                                                                                             |
+| ------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `inner_ratio` | `1.0`   | Inner-IoU (arXiv:2311.02877). The IoU term is measured between auxiliary boxes scaled about their own centres; the CIoU penalty terms stay on the original boxes. Rescales the box gradient without moving any geometry. |
+| `o2o_topk2`   | `1`     | Secondary top-k for the one-to-one head's assigner, previously hardcoded in `E2ELoss`.                                                                                                                                   |
+
+## Why `o2o_topk2` is worth a run at all
+
+`topk2` short-circuits when it equals `topk` (`tal.py`), and `E2ELoss` passes `topk2=None` to the
+one-to-many head — which resolves to `topk`, so the branch never fires there. Only the one-to-one head gets
+`topk2=1`. So the secondary assignment is the model's one small-target-aware assignment mechanism, it
+applies to the **inference** head alone, and until now there was no way to set it.
+
+This also corrects the design doc a second time: the doc treats "STAL" as solving small targets from the
+assignment side of the training head. The mechanism exists, but not where the doc assumes.
+
+## Verification before launch
+
+- `inner_ratio=1.0` skips the new branch, so CIoU is identical: `max abs diff = 0.000e+00`.
+- The formula reduces to plain IoU as the ratio approaches 1 (`5.5e-07`; the residual is the pre-existing
+  `eps` inflation of `h1`/`h2` in the xyxy branch feeding the corner reconstruction, not new error).
+- Survives `autocast`, output finite.
+- `train/box_loss` responds monotonically: `1.2 -> 1.4398`, `1.0 -> 1.5064`, `0.8 -> 1.6342`.
+- Probed inside a real training run: `inner_ratio=0.8` reaches both heads' `BboxLoss`; `o2o_topk2=3` gives
+  the o2o assigner `topk/topk2 = 7/3` while o2m stays `10/10`. Defaults probe as `1.0` and `1`.
+
+**A trap worth recording: coco8 mAP cannot resolve either knob.** The first smoke test scored two genuinely
+different configurations identically to six decimals, because mAP over 4 val images is quantized far too
+coarsely. That looked exactly like a dead knob. Use `train/box_loss` or probe the criterion.
+
+## Runs
+
+Value screening on `dspcbsd` only — the one dataset with a noise floor. Two jobs per card, ~25 GB each.
+
+```bash
+EXP=/Users/louis/workspace/ultra_louis_work/expman/.venv/bin/expman-cli
+D=/data/shared-datasets/louis_data/anomaly_bench/dspcbsd/data.yaml
+B="model=yolo26n.pt epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True project=yolo26-defect-bench"
+
+$EXP launch --snap --args "nohupyolo 0 train data=$D $B inner_ratio=0.8 device=4 name=dspcbsd_m1_ir08_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=$D $B inner_ratio=1.2 device=5 name=dspcbsd_m1_ir12_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=$D $B inner_ratio=0.7 device=6 name=dspcbsd_m1_ir07_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=$D $B o2o_topk2=2 device=6 name=dspcbsd_m3_topk22_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=$D $B o2o_topk2=3 device=7 name=dspcbsd_m3_topk23_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=$D $B o2o_topk2=4 device=7 name=dspcbsd_m3_topk24_n_s0"
+```
+
+Also running: `3cad_baseline_n_s1` and `3cad_baseline_n_s2`, which give `3cad` its own noise floor. Both of
+the largest signals on the board so far (Z1 AP_small +8.1x, Z3 +19.0x) are on `3cad`, and neither can be
+called significant until that floor exists.
+
+**Read the winner with care: six arms judged at 2sd each carry a real chance that one clears the bar by
+luck.** Screening picks a value; it does not establish an effect. Whatever wins has to reproduce on the
+other two datasets before it means anything.
+
+## M2 (NWD) deliberately not written
+
+Its gate was Z1, and Z1 returned a contradiction (`dspcbsd` AP_small -4.1x against `3cad` +8.1x) rather
+than a green light. Independently, CIoU already carries a normalized centre-distance term (`rho2/c2`) and
+an aspect term (`v`) — the two components NWD's `W2^2` would add. Weak prior, no supporting evidence, and
+`C` needs per-dataset tuning. Revisit only if `3cad`'s own noise floor turns the Z1 signal there into a
+real effect.

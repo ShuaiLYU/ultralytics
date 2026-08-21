@@ -30,9 +30,14 @@ with measurements. Proposing something from that list is the main failure mode �
   3 (P3/8), 5 (P4/16), 7 (P5/32). Only layers 0, 1, 3 are upstream of P3, so only they can affect what the
   finest detection level ever sees.
 - **The assigner requires the anchor centre to fall inside the GT box**
-  (`TaskAlignedAssigner.select_candidates_in_gts`, `ultralytics/utils/tal.py`), with a clamp that inflates
-  any GT side below the smallest stride up to that stride. `topk` therefore only binds when more than `topk`
-  anchors are eligible at all. This matters enormously — see §5.
+  (`TaskAlignedAssigner.select_candidates_in_gts`, `ultralytics/utils/tal.py`), with a clamp on the GT
+  sides. `topk` therefore only binds when more than `topk` anchors are eligible at all. This matters
+  enormously — see §5.
+- **That clamp is not monotone.** A side below `stride[0]`=8 is inflated straight to `stride_val`=`stride[1]`=16,
+  while a side in `[8, 16)` is left alone — so a slightly _larger_ GT recruits _fewer_ anchors. Averaged over
+  16 sub-pixel offsets at `topk=10`, a 7.9px side gets 4.6 candidates and an 8.1px side gets 2.7. The band is
+  not marginal: it holds 34.3% of `3cad` and 30.8% of `tianchifabirc` boxes. `tal_min_side` replaces the
+  clamp with a plain floor and is under test (§5).
 - Must survive ONNX/TensorRT export. Extra op count and dynamic shapes are real costs, not footnotes.
 
 **Fixed experimental protocol** (do not propose changing it; comparability across ~50 runs depends on it):
@@ -49,18 +54,23 @@ Measured with `scripts/anomaly_bench/anchor_pool.py` over the COCO GT that `coco
 number of anchors whose centre falls inside a GT box across P3+P4+P5 at `imgsz=640`; "starved" means the pool
 is smaller than the o2m head's `topk=10`.
 
-| dataset       | cls | GT boxes | median pool | starved | pool ≤ 1 | AR median | AR p90 | side < 6px @640 |
-| ------------- | --- | -------- | ----------- | ------- | -------- | --------- | ------ | --------------- |
-| dspcbsd       | 9   | 3,167    | 55          | 6.7%    | 0.1%     | 1.25      | 2.50   | 0.0%            |
-| 3cad          | 24  | 1,801    | 7           | 55.0%   | 19.1%    | 1.90      | 6.95   | 8.7%            |
-| tianchifabirc | 20  | 1,973    | 6           | 55.5%   | 11.5%    | 5.16      | 52.83  | 31.1%           |
+| dataset       | cls | GT boxes | median pool | starved | pool ≤ 1 | pool = 0 | AR median | AR p90 | side < 6px @640 |
+| ------------- | --- | -------- | ----------- | ------- | -------- | -------- | --------- | ------ | --------------- |
+| dspcbsd       | 9   | 3,167    | 55          | 6.7%    | 0.1%     | 0.0%     | 1.25      | 2.50   | 0.0%            |
+| 3cad          | 24  | 1,801    | 7           | 52.1%   | 8.8%     | 0.0%     | 1.90      | 6.95   | 8.7%            |
+| tianchifabirc | 20  | 1,973    | 12          | 40.6%   | 5.4%     | 0.0%     | 5.16      | 52.83  | 31.1%           |
 
 - **dspcbsd** (PCB): compact defects, healthy anchor pool, and **near saturation** — baseline AP_small is
   0.3985 and nothing we tested moved it by more than 0.01. A change that only works here is not interesting.
 - **3cad** (aluminium/3C parts, 58% of images are defect-free): **over half the objects cannot supply even 10
-  anchors, and 19% get at most one.** This is where every real effect showed up.
-- **tianchifabirc** (fabric): equally starved, but the defects are **slivers** — 31% have a side thinner than
-  6 px at 640. Highest variance, hardest to move.
+  anchors, and 9% get at most one.** This is where every real effect showed up.
+- **tianchifabirc** (fabric): starved, though **less so than 3cad** — 41% vs 52%, and its median pool is
+  nearly double. Its distinguishing feature is that the defects are **slivers** — 31% have a side thinner
+  than 6 px at 640. Highest variance, hardest to move.
+- **No GT anywhere has an empty pool.** `pool = 0` is 0.0% on all three, so every object gets at least one
+  positive. Because the one-to-one head keeps a single anchor per GT (`topk2=1`), it only needs a non-empty
+  pool — **so starvation is a one-to-many problem, and an assignment fix is a one-to-many fix.** Do not
+  propose assignment work justified by "objects with no supervision"; there are none.
 
 **Noise floors (2sd across 3 baseline seeds).** These are the significance bar.
 
@@ -149,9 +159,17 @@ on; do not re-recommend it.
 | **Aspect-ratio-aware stem** (`k=(6,3)`)          | Not falsified but **de-motivated**: it existed to explain `k=6` allegedly hurting tianchifabirc, and at 3 seeds that −0.0065 flipped to **+0.0071**. The AR measurements in §2 stand; the causal story did not. Only revive it with a new argument.                                                                                                                                            |
 
 **Pattern worth internalizing: every loss-side knob we tried came back neutral-or-harmful, and it is not a
-coincidence.** On 3cad and tianchifabirc, 55% of objects cannot fill the assigner's candidate list. You
-cannot reweight positives that do not exist. Loss-reweighting proposals should be treated as low prior here
-unless they explain how they reach starved objects.
+coincidence.** On 3cad and tianchifabirc, 52% and 41% of objects cannot fill the assigner's candidate list.
+You cannot reweight positives that do not exist. Loss-reweighting proposals should be treated as low prior
+here unless they explain how they reach starved objects.
+
+**One caveat on the NWD row above, because it is the seam where a good proposal could still get in.** That
+row closes NWD **as a box loss**. It says nothing about NWD or any other Gaussian similarity used **as an
+assignment metric** — `TaskAlignedAssigner.iou_calculation`, which `BboxLoss` never touches. That function
+also sets the _magnitude of the soft classification target_: `pos_overlaps` in `_forward` caps a GT's target
+score at its best achievable CIoU, which is intrinsically low for a small box, so small defects train
+against a systematically weaker label. That is a scale bias the §4 argument does not cover, and it is under
+test (§5).
 
 ---
 
@@ -164,22 +182,38 @@ and with k=3 each one skips pixels. This is what `k=6` fixes — cheaply, on the
 is there a better operator than a wide strided conv for lossless-ish downsampling at this budget?
 
 **(b) Anchor starvation.** The assigner can only pick anchors whose centre is inside the GT box, so a small
-object has a hard cap on positives regardless of any `topk`. No weight-side change can lift it — only finer
-stride or more pixels.
+object has a hard cap on positives regardless of any `topk`. Finer stride or more pixels lift it directly;
+so, at zero cost, does relaxing the geometric prior itself — see the knobs below.
 
-| dataset | levels    | imgsz | median pool | starved | pool ≤ 1 |
-| ------- | --------- | ----- | ----------- | ------- | -------- |
-| 3cad    | P3–P5     | 640   | 7           | 55.0%   | 19.1%    |
-| 3cad    | P3–P5     | 960   | 17          | 36.0%   | 9.4%     |
-| 3cad    | P3–P5     | 1280  | 35          | 21.6%   | 3.7%     |
-| 3cad    | **P2**–P5 | 640   | 35          | 21.6%   | 3.7%     |
-| dspcbsd | P3–P5     | 640   | 55          | 6.7%    | 0.1%     |
-| dspcbsd | **P2**–P5 | 640   | 254         | 0.1%    | 0.0%     |
+| dataset       | levels    | imgsz | median pool | starved | pool ≤ 1 |
+| ------------- | --------- | ----- | ----------- | ------- | -------- |
+| 3cad          | P3–P5     | 640   | 7           | 52.1%   | 8.8%     |
+| 3cad          | P3–P5     | 960   | 17          | 34.9%   | 5.4%     |
+| 3cad          | P3–P5     | 1280  | 35          | 21.3%   | 2.4%     |
+| 3cad          | **P2**–P5 | 640   | 35          | 21.3%   | 2.4%     |
+| tianchifabirc | P3–P5     | 640   | 12          | 40.6%   | 5.4%     |
+| tianchifabirc | **P2**–P5 | 640   | 26          | 24.2%   | 0.0%     |
+| dspcbsd       | P3–P5     | 640   | 55          | 6.7%    | 0.1%     |
+| dspcbsd       | **P2**–P5 | 640   | 254         | 0.1%    | 0.0%     |
 
-**A P2 head at `imgsz=640` matches `imgsz=1280` on starvation at a fraction of the cost.** `yolo26-p2.yaml`
-already exists and is untested here — it is the obvious next move, which is precisely why we want to know
-whether the literature has something better than a plain extra P2 level (the usual objections: P2 is
-expensive in activations, and it is the noisiest level).
+**A P2 head at `imgsz=640` matches `imgsz=1280` on starvation at a fraction of the cost** — on 3cad the two
+rows are identical to the digit. `yolo26-p2.yaml` already exists and is untested here — it is the obvious
+next move, which is precisely why we want to know whether the literature has something better than a plain
+extra P2 level (the usual objections: P2 is expensive in activations, and it is the noisiest level).
+
+**Three zero-FLOP assignment knobs are in flight, so do not propose them as new** (commit `74d9df50f`,
+runs `3cad_a{1,2,3}_*`). All are training-only and reach both heads, though per §2 they can only act on the
+one-to-many head in practice:
+
+| knob | arg              | mechanism                                                                                                |
+| ---- | ---------------- | -------------------------------------------------------------------------------------------------------- |
+| K1   | `tal_min_side`   | monotone floor on GT sides, replacing the non-monotone clamp of §1                                       |
+| K2   | `tal_prior=rfla` | RFLA (arXiv:2208.08738): rank anchors by receptive-field distance, guaranteeing `topk` candidates per GT |
+| K3   | `tal_metric=nwd` | scale-invariant Wasserstein similarity inside the assigner, lifting the soft-label ceiling               |
+
+Measured effect of K1 on the pool (starved %, `topk=10`): 3cad 52.1% → 45.1% at `min_side=16` → **0%** at 24;
+tianchifabirc 40.6% → 34.2% → **0%**; dspcbsd 6.7% → 6.3% → 0%. The grid `{8, 16, 24, 32}` is complete
+because the pool counts `int(w // stride)` and so steps only at multiples of 8.
 
 Both bottlenecks are real, and the data says so: `k=6` clears p<0.05 on 3cad on both metrics — so (a) matters
 — yet pure resolution buys roughly twice the absolute AP_small there — so (b) matters more. A candidate that
@@ -232,8 +266,9 @@ measurement or a proof, and each cites the script that produced it — check the
 | `k=6` pretrained donor builder   | `scripts/anomaly_bench/make_k6_donor.py`                                                     |
 | SPD-Conv ≡ `Conv(k=6,s=2)` proof | `scripts/anomaly_bench/spd_equivalence.py`                                                   |
 | o2o duplicate-box proof          | `scripts/anomaly_bench/nms_probe.py`                                                         |
-| Anchor-pool / AR measurement     | `scripts/anomaly_bench/anchor_pool.py`                                                       |
+| Anchor-pool / AR measurement     | `scripts/anomaly_bench/anchor_pool.py` (`--min-side`, `--strides` reproduce every §2/§5 row) |
 | Loss and assigner                | `ultralytics/utils/loss.py` (`E2ELoss`, `BboxLoss`), `ultralytics/utils/tal.py`              |
+| Assignment knobs under test      | `tal_min_side`, `tal_prior`, `tal_rf_scale`, `tal_metric`, `tal_nwd_gamma` in `default.yaml` |
 | Extra AP columns                 | `coco_eval` in `ultralytics/cfg/default.yaml`, default off, purely additive to `results.csv` |
 
 Open at the time of writing: `imgsz=960` seed replicates on 3cad and tianchifabirc, and a second

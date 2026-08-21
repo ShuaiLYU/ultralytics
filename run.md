@@ -613,3 +613,67 @@ than a green light. Independently, CIoU already carries a normalized centre-dist
 an aspect term (`v`) — the two components NWD's `W2^2` would add. Weak prior, no supporting evidence, and
 `C` needs per-dataset tuning. Revisit only if `3cad`'s own noise floor turns the Z1 signal there into a
 real effect.
+
+---
+
+# EXPERIMENT INDEX — maintained, canonical
+
+**Every run on this branch, one row each. Keep this current: add a row when a run is launched (status
+`running`, metrics `--`) and fill it in when the run completes.** Sections above hold the reasoning and the
+verbatim commands; this table is the inventory.
+
+Common to all rows unless stated: `yolo26n`, 100 epochs, `imgsz=640`, `batch=128`, `seed=0`,
+`coco_eval=True`, `project=yolo26-defect-bench`, data under
+`/data/shared-datasets/louis_data/anomaly_bench/<dataset>/data.yaml`.
+
+`ΔAP_S (×floor)` is the change in AP_small against that dataset's baseline, in multiples of the **2sd
+noise floor of 0.0016** measured on `dspcbsd`. Only `dspcbsd` has seed replicates, so on `3cad` and
+`tianchifabirc` the multiple is indicative of magnitude, **not a significance test**. Floors: mAP50-95
+0.0067 · AP_small 0.0016 · AP_medium 0.0110 · AP_large 0.2034 (unusable).
+
+| run                             | dataset       | variable          | status    | mAP50-95 | AP_S   | AP_M   | ΔAP_S (×floor)   | verdict                         |
+| ------------------------------- | ------------- | ----------------- | --------- | -------- | ------ | ------ | ---------------- | ------------------------------- |
+| `dspcbsd_baseline_n_s0`         | dspcbsd       | baseline          | completed | 0.4737   | 0.3982 | 0.5437 | --               | baseline                        |
+| `3cad_baseline_n_s0`            | 3cad          | baseline          | completed | 0.2900   | 0.1882 | 0.2699 | --               | baseline                        |
+| `tianchifabirc_baseline_n_s0`   | tianchifabirc | baseline          | completed | 0.1936   | 0.1255 | 0.1870 | --               | baseline                        |
+| `dspcbsd_baseline_n_s1`         | dspcbsd       | baseline seed 1   | completed | 0.4802   | 0.3979 | 0.5543 | --               | baseline                        |
+| `3cad_baseline_n_s1`            | 3cad          | baseline seed 1   | running   | --       | --     | --     | --               | running                         |
+| `dspcbsd_baseline_n_s2`         | dspcbsd       | baseline seed 2   | completed | 0.4756   | 0.3994 | 0.5516 | --               | baseline                        |
+| `3cad_baseline_n_s2`            | 3cad          | baseline seed 2   | running   | --       | --     | --     | --               | running                         |
+| `dspcbsd_z1_dfl0_n_s0`          | dspcbsd       | `dfl=0`           | completed | 0.4752   | 0.3920 | 0.5462 | -0.0065 (-4.1×)  | inconclusive, datasets disagree |
+| `3cad_z1_dfl0_n_s0`             | 3cad          | `dfl=0`           | completed | 0.2938   | 0.2012 | 0.3224 | +0.0130 (+8.1×)  | inconclusive, datasets disagree |
+| `tianchifabirc_z1_dfl0_n_s0`    | tianchifabirc | `dfl=0`           | completed | 0.1925   | 0.1293 | 0.1792 | +0.0038 (+2.4×)  | inconclusive, datasets disagree |
+| `dspcbsd_z2_clspw05_n_s0`       | dspcbsd       | `cls_pw=0.5`      | completed | 0.4720   | 0.3874 | 0.5440 | -0.0111 (-6.9×)  | fail                            |
+| `3cad_z2_clspw05_n_s0`          | 3cad          | `cls_pw=0.5`      | completed | 0.2719   | 0.1740 | 0.2530 | -0.0142 (-8.9×)  | fail                            |
+| `tianchifabirc_z2_clspw05_n_s0` | tianchifabirc | `cls_pw=0.5`      | completed | 0.1960   | 0.1274 | 0.1869 | +0.0019 (+1.2×)  | fail                            |
+| `3cad_z2_clspw10_n_s0`          | 3cad          | `cls_pw=1.0`      | completed | 0.2301   | 0.1507 | 0.2155 | -0.0375 (-23.4×) | fail                            |
+| `tianchifabirc_z2_clspw10_n_s0` | tianchifabirc | `cls_pw=1.0`      | completed | 0.1998   | 0.1266 | 0.1928 | +0.0011 (+0.7×)  | fail                            |
+| `dspcbsd_z3_k6_n_s0`            | dspcbsd       | `k=6` downsample  | completed | 0.4812   | 0.4049 | 0.5431 | +0.0064 (+4.0×)  | **pass**                        |
+| `3cad_z3_k6_n_s0`               | 3cad          | `k=6` downsample  | completed | 0.3050   | 0.2186 | 0.2778 | +0.0304 (+19.0×) | **pass**                        |
+| `tianchifabirc_z3_k6_n_s0`      | tianchifabirc | `k=6` downsample  | completed | 0.1972   | 0.1190 | 0.2019 | -0.0065 (-4.1×)  | **pass**                        |
+| `dspcbsd_z5_mosaic0_n_s0`       | dspcbsd       | `mosaic=0.0`      | completed | 0.4643   | 0.3873 | 0.5029 | -0.0112 (-7.0×)  | fail                            |
+| `3cad_z5_mosaic0_n_s0`          | 3cad          | `mosaic=0.0`      | completed | 0.2632   | 0.1756 | 0.2532 | -0.0126 (-7.9×)  | fail                            |
+| `tianchifabirc_z5_mosaic0_n_s0` | tianchifabirc | `mosaic=0.0`      | completed | 0.1820   | 0.1142 | 0.1726 | -0.0113 (-7.1×)  | fail                            |
+| `dspcbsd_z7_imgsz960_n_s0`      | dspcbsd       | `imgsz=960`       | completed | 0.4831   | 0.4057 | 0.5637 | +0.0072 (+4.5×)  | reference, not a candidate      |
+| `3cad_z7_imgsz960_n_s0`         | 3cad          | `imgsz=960`       | completed | 0.3132   | 0.2827 | 0.2979 | +0.0945 (+59.1×) | reference, not a candidate      |
+| `dspcbsd_m1_ir07_n_s0`          | dspcbsd       | `inner_ratio=0.7` | running   | --       | --     | --     | --               | running                         |
+| `dspcbsd_m1_ir08_n_s0`          | dspcbsd       | `inner_ratio=0.8` | running   | --       | --     | --     | --               | running                         |
+| `dspcbsd_m1_ir12_n_s0`          | dspcbsd       | `inner_ratio=1.2` | running   | --       | --     | --     | --               | running                         |
+| `dspcbsd_m3_topk22_n_s0`        | dspcbsd       | `o2o_topk2=2`     | running   | --       | --     | --     | --               | running                         |
+| `dspcbsd_m3_topk23_n_s0`        | dspcbsd       | `o2o_topk2=3`     | running   | --       | --     | --     | --               | running                         |
+| `dspcbsd_m3_topk24_n_s0`        | dspcbsd       | `o2o_topk2=4`     | running   | --       | --     | --     | --               | running                         |
+
+Also on disk, excluded above because they carry no interpretable numbers: `smoke_{3cad,dspcbsd,tianchifabirc}_n`
+and `_n_v2` (Phase 0 data-loading checks) and `k6_donor` (the CPU job that builds the Z3 donor; `lsta`
+reports it FAILED, which is a misclassification — it writes no training completion marker).
+
+## Not launched
+
+| candidate              | why it is waiting                                                                                  |
+| ---------------------- | -------------------------------------------------------------------------------------------------- |
+| Z4 P2 head             | held by Louis; needs no code, `yolo26-p2.yaml` already exists                                      |
+| Z6 `scale=0.2`         | mechanism overlaps Z5, and Z5 failed on all three datasets — low prior now                         |
+| M2 NWD blend           | downgraded: its gate Z1 came back contradictory, and CIoU already carries both terms NWD would add |
+| Z3 position ablation   | only if `k=6` survives the 3cad seeds — widen layer 3 only, or the stem too                        |
+| Z3 x Z7                | `k=6` at `imgsz=960` on 3cad, to test whether the two are additive                                 |
+| test-split + per-class | `eval_bench.py` over the finished runs; Phase A still owes these                                   |

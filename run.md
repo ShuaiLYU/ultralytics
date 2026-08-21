@@ -650,7 +650,7 @@ Proved on the saved `predictions.json`, no GPU needed — post-hoc class-wise NM
 expman-cli pull yolo26-defect-bench yolo26-defect-bench__dspcbsd_m3_topk22_n_s0 --what all
 expman-cli pull yolo26-defect-bench yolo26-defect-bench__dspcbsd_baseline_n_s0  --what all
 P=/Users/louis/workspace/ultra_louis_work/expman/data/pulled/yolo26-defect-bench
-python runs/tests/nms_probe.py $P/dspcbsd_baseline_n_s0 $P/dspcbsd_m3_topk22_n_s0
+python scripts/anomaly_bench/nms_probe.py $P/dspcbsd_baseline_n_s0 $P/dspcbsd_m3_topk22_n_s0
 ```
 
 ```
@@ -680,8 +680,8 @@ measure the pool directly, from the `gt_val.json` that `coco_eval` already write
 
 ```bash
 P=/Users/louis/workspace/ultra_louis_work/expman/data/pulled/yolo26-defect-bench
-python runs/tests/anchor_pool.py $P/3cad_baseline_n_s0/gt_val.json    --imgsz 640 960 1280
-python runs/tests/anchor_pool.py $P/dspcbsd_baseline_n_s0/gt_val.json --imgsz 640 960 1280
+python scripts/anomaly_bench/anchor_pool.py $P/3cad_baseline_n_s0/gt_val.json    --imgsz 640 960 1280
+python scripts/anomaly_bench/anchor_pool.py $P/dspcbsd_baseline_n_s0/gt_val.json --imgsz 640 960 1280
 ```
 
 | dataset | levels    | imgsz | median pool | pool < topk(10) | pool <= 1 |
@@ -709,7 +709,7 @@ This explains the entire results table so far:
 That makes Z4 the highest-value untested candidate, and it moves the plan off loss knobs and onto
 stride/resolution. Z4 is held by Louis.
 
-Two probes kept, both CPU-only and both reusable: `runs/tests/nms_probe.py` and `runs/tests/anchor_pool.py`.
+Two probes kept, both CPU-only and both reusable: `scripts/anomaly_bench/nms_probe.py` and `scripts/anomaly_bench/anchor_pool.py`.
 
 # EXPERIMENT INDEX — maintained, canonical
 

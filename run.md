@@ -1140,12 +1140,12 @@ anywhere, and that 3cad's remaining headroom from resolution alone stops at 1024
 
 Recorded for later; **none of these is in force today**.
 
-| option                        | verdict                                                                                                 |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| **original pixels**           | **in force** — dataset-intrinsic; describes difficulty wrongly, which the caveat above covers instead   |
-| letterbox-640, pinned         | the better definition, understood and validated, **not adopted** — see Migration for what it would cost |
-| per-run `imgsz` frame         | **wrong**: the grouping would move with the arm, so "AP_small up" could just mean fewer boxes are small |
-| relative area (% of image)    | resolution-proof, but abandons the COCO convention and comparability with published numbers             |
+| option                     | verdict                                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **original pixels**        | **in force** — dataset-intrinsic; describes difficulty wrongly, which the caveat above covers instead   |
+| letterbox-640, pinned      | the better definition, understood and validated, **not adopted** — see Migration for what it would cost |
+| per-run `imgsz` frame      | **wrong**: the grouping would move with the arm, so "AP_small up" could just mean fewer boxes are small |
+| relative area (% of image) | resolution-proof, but abandons the COCO convention and comparability with published numbers             |
 
 The load-bearing property is that the reference is **pinned at 640 and does not follow `args.imgsz`** — that
 is what keeps a 640 arm and a 960 arm comparable. Pinning also improves the statistics: under original
@@ -1193,6 +1193,122 @@ If it is ever adopted, the pass is: re-validate `best.pt` for the arms that matt
 / `k6+960` across the three datasets) with both sides rescaled — twelve val-only jobs, no retraining. Until
 then the caveat above is the mitigation, and `dspcbsd AP_small` must not be read as a small-object result.
 
+# WAVE A — label assignment (bottleneck b)
+
+Three knobs, all training-only: zero params, zero inference FLOPs, zero export surface. Code in
+`74d9df50f`; `E2ELoss` builds one `v8DetectionLoss` per head, so every knob reaches the one2many and the
+one2one assigner together. Defaults are bit-exact with the pre-change code (3 epochs of deterministic
+coco8 training give an identical `state_dict` hash), so **the existing baselines stay valid comparators
+and no baseline was re-run.**
+
+| knob | arg                               | what it changes                                                                                        |
+| ---- | --------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| K1   | `tal_min_side`                    | monotone floor on GT sides, replacing the legacy clamp in `select_candidates_in_gts`                   |
+| K2   | `tal_prior=rfla`, `tal_rf_scale`  | RFLA (arXiv:2208.08738): rank anchors by receptive-field distance, `topk` candidates per GT guaranteed |
+| K3   | `tal_metric=nwd`, `tal_nwd_gamma` | scale-invariant Wasserstein similarity in place of CIoU inside the assigner                            |
+
+## The legacy clamp is not monotone, and the old pool numbers were measured against the wrong clamp
+
+`tal.py:300` inflates a GT side **below `stride[0]`=8 straight to `stride_val`=`stride[1]`=16**, and leaves
+`[8, 16)` untouched. So a side just above 8 recruits _fewer_ anchors than one just below it. Measured on a
+synthetic grid with the centre averaged over 16 sub-pixel offsets to cancel alignment noise, `topk=10`:
+
+| GT side px    | 3    | 5    | 7.9  | 8.1     | 10   | 12   | 15.9 | 16.1 |
+| ------------- | ---- | ---- | ---- | ------- | ---- | ---- | ---- | ---- |
+| legacy        | 4.6  | 4.6  | 4.6  | **2.7** | 2.7  | 2.7  | 4.6  | 7.2  |
+| `min_side=8`  | 1.3  | 1.3  | 1.3  | 2.7     | 2.7  | 2.7  | 4.6  | 7.2  |
+| `min_side=16` | 4.6  | 4.6  | 4.6  | 4.6     | 4.6  | 4.6  | 4.6  | 7.2  |
+| `min_side=24` | 10.6 | 10.6 | 10.6 | 10.6    | 10.6 | 10.6 | 10.6 | 10.6 |
+| `min_side=32` | 18.8 | 18.8 | 18.8 | 18.8    | 18.8 | 18.8 | 18.8 | 18.8 |
+
+`anchor_pool.py` had inflated to 8 rather than 16 (fixed in `46156e462`), which both mis-stated the pool
+and erased this band. Re-measured on the real GT, `imgsz=640`, `topk=10`:
+
+```bash
+B=/Users/louis/workspace/ultra_louis_work/expman/data/pulled/yolo26-defect-bench
+for d in 3cad tianchifabirc dspcbsd; do python scripts/anomaly_bench/anchor_pool.py $B/${d}_baseline_n_s0/gt_val.json --imgsz 640 --topk 10 --min-side 8 16 24 32; done
+```
+
+| dataset         | short side in [8,16) | starved (legacy) | pool<=1 (legacy) | **pool==0** | starved as previously reported |
+| --------------- | -------------------- | ---------------- | ---------------- | ----------- | ------------------------------ |
+| `3cad`          | **34.3%**            | **52.1%**        | **8.8%**         | **0.0%**    | 55.0% / 19.1%                  |
+| `tianchifabirc` | **30.8%**            | **40.6%**        | **5.4%**         | **0.0%**    | 55.5% / 11.5%                  |
+| `dspcbsd`       | 2.0%                 | 6.7%             | 0.1%             | **0.0%**    | 6.7% / 0.1%                    |
+
+The previously-reported figures are reproduced exactly by the `min_side=8` row of the same script, which
+confirms the old clamp was the only error. Three consequences:
+
+1. **`pool == 0` is 0.0% everywhere, so no GT is ever left without a positive.** Since the one-to-one head
+   runs `topk2=1` and therefore needs only a non-empty pool, **this whole wave is effectively a one2many
+   experiment** even though the knobs are wired to both heads. Conclusions must say so.
+2. **`tianchifabirc` is materially _less_ starved than `3cad`** (40.6% vs 52.1%), not equally starved.
+3. **`dspcbsd` is a free negative control for K1**: only 2.0% of its boxes sit in the affected band, so
+   `min_side=16` should not move it. If it does, the mechanism is not the one we think.
+
+Dose grid per dataset (starved %, `topk=10`), which is what selected the arms:
+
+| min_side | 3cad   | tianchifabirc | dspcbsd | character                                                                  |
+| -------- | ------ | ------------- | ------- | -------------------------------------------------------------------------- |
+| legacy   | 52.1%  | 40.6%         | 6.7%    | baseline                                                                   |
+| 8        | 55.0%  | 55.5%         | 6.7%    | **reverse dose** — stricter than legacy; isolates monotonicity from dose   |
+| 16       | 45.1%  | 34.2%         | 6.3%    | closes the discontinuity; pool<=1 -> 0%                                    |
+| 24       | **0%** | **0%**        | **0%**  | starvation eliminated; median pool 14 just fills `topk=10`                 |
+| 32       | 0%     | 0%            | 0%      | **over-dose** — buys no coverage, only competition; the precision-cost arm |
+
+`min_side` 16/18/20/22 give an **identical** pool, because the pool counts `int(w // stride)` and so only
+steps at multiples of 8. The grid {8, 16, 24, 32} is therefore complete and a finer sweep is meaningless.
+
+## A1/A2/A3 — screening wave, 3cad only, 1 seed
+
+Snap **`e391163211bf`**. Nine runs on GPUs 4-7, **co-located two-per-card with the running coco arms**
+(56.9/97.9 GiB per card). Hard gate: `3cad_baseline_n_s0/args.yaml` differs from `default.yaml` in
+`batch=128` and `coco_eval=True` only, and `$B` below reproduces both; nothing else is overridden.
+
+```bash
+EXP=/Users/louis/workspace/ultra_louis_work/expman/.venv/bin/expman-cli
+D=/data/shared-datasets/louis_data/anomaly_bench
+B="model=yolo26n.pt epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True project=yolo26-defect-bench"
+
+$EXP bundle
+$EXP launch --snap --args "nohupyolo 0 train data=$D/3cad/data.yaml $B tal_min_side=16 device=4 name=3cad_a1_ms16_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=$D/3cad/data.yaml $B tal_min_side=24 device=5 name=3cad_a1_ms24_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=$D/3cad/data.yaml $B tal_prior=rfla tal_rf_scale=1 device=6 name=3cad_a2_rfla1_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=$D/3cad/data.yaml $B tal_metric=nwd device=7 name=3cad_a3_nwd10_n_s0"
+$EXP launch --snap --args "nohupyolo --after 3cad_a1_ms16_n_s0 train data=$D/3cad/data.yaml $B tal_min_side=8 device=4 name=3cad_a1_ms08_n_s0"
+$EXP launch --snap --args "nohupyolo --after 3cad_a1_ms24_n_s0 train data=$D/3cad/data.yaml $B tal_min_side=32 device=5 name=3cad_a1_ms32_n_s0"
+$EXP launch --snap --args "nohupyolo --after 3cad_a2_rfla1_n_s0 train data=$D/3cad/data.yaml $B tal_prior=rfla tal_rf_scale=4 device=6 name=3cad_a2_rfla4_n_s0"
+$EXP launch --snap --args "nohupyolo --after 3cad_a3_nwd10_n_s0 train data=$D/3cad/data.yaml $B tal_metric=nwd tal_nwd_gamma=2.0 device=7 name=3cad_a3_nwd20_n_s0"
+$EXP launch --snap --args "nohupyolo --after 3cad_a1_ms08_n_s0 train data=$D/3cad/data.yaml $B tal_metric=nwd tal_nwd_gamma=0.5 device=4 name=3cad_a3_nwd05_n_s0"
+```
+
+| GPU | now                  | then                 | then                 |
+| --- | -------------------- | -------------------- | -------------------- |
+| 4   | `3cad_a1_ms16_n_s0`  | `3cad_a1_ms08_n_s0`  | `3cad_a3_nwd05_n_s0` |
+| 5   | `3cad_a1_ms24_n_s0`  | `3cad_a1_ms32_n_s0`  | --                   |
+| 6   | `3cad_a2_rfla1_n_s0` | `3cad_a2_rfla4_n_s0` | --                   |
+| 7   | `3cad_a3_nwd10_n_s0` | `3cad_a3_nwd20_n_s0` | --                   |
+
+**One seed here is screening, not evidence.** No conclusion may be drawn from this wave; it only picks
+which arms get 3 seeds. Promotion bar is deliberately low -- 3cad AP_small delta above **1x** the floor
+(0.0187), not 2x -- because at n=1 a single draw carries +-0.019 and the risk is a false negative, not a
+false positive. K1 is read as a dose curve, whose shape is more robust to seed noise than any single point.
+
+**The `time` column of these nine runs is void.** Co-location costs ~8% (100 s/epoch here vs the clean
+baseline's 92.8 s/epoch), so wall-clock is still usable as a rough guide, but the clean per-run timings for
+future budgeting are the baselines: 3cad 2.58 h, tianchifabirc 1.27 h, dspcbsd 1.26 h.
+
+First-epoch losses already separate, which is the cheapest confirmation the knobs bite:
+
+| run                  | box_loss | cls_loss  | l1_loss  |
+| -------------------- | -------- | --------- | -------- |
+| `3cad_a1_ms24_n_s0`  | 2.114    | 15.22     | 0.006761 |
+| `3cad_a2_rfla1_n_s0` | 2.253    | 15.71     | 0.007244 |
+| `3cad_a3_nwd10_n_s0` | 2.545    | **13.44** | 0.007268 |
+
+`nwd`'s lower `cls_loss` is expected rather than encouraging: `loss_cls` is a BCE sum divided by
+`target_scores.sum()`, and lifting the soft-label ceiling enlarges the denominator. It confirms K3 is
+active; it says nothing about whether it helps.
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status
@@ -1216,59 +1332,68 @@ that was wrong and the 3cad rows are restated here (see the floor section above)
 **`tianchifabirc` still has no floor, so every multiple in its rows is `n/a`, not "small".** Nothing in that
 column is a significance claim until `tianchifabirc_baseline_n_s1/_s2` land.
 
-| run                              | dataset       | variable          | status    | mAP50-95 | AP_S   | AP_M   | ΔAP_S (×floor)     | verdict                                 |
-| -------------------------------- | ------------- | ----------------- | --------- | -------- | ------ | ------ | ------------------ | --------------------------------------- |
-| `dspcbsd_baseline_n_s0`          | dspcbsd       | baseline          | completed | 0.4737   | 0.3982 | 0.5437 | --                 | baseline                                |
-| `3cad_baseline_n_s0`             | 3cad          | baseline          | completed | 0.2900   | 0.1882 | 0.2699 | --                 | baseline                                |
-| `tianchifabirc_baseline_n_s0`    | tianchifabirc | baseline          | completed | 0.1936   | 0.1255 | 0.1870 | --                 | baseline                                |
-| `dspcbsd_baseline_n_s1`          | dspcbsd       | baseline seed 1   | completed | 0.4802   | 0.3979 | 0.5543 | --                 | baseline                                |
-| `3cad_baseline_n_s1`             | 3cad          | baseline seed 1   | completed | 0.2932   | 0.2032 | 0.2752 | --                 | baseline                                |
-| `dspcbsd_baseline_n_s2`          | dspcbsd       | baseline seed 2   | completed | 0.4756   | 0.3994 | 0.5516 | --                 | baseline                                |
-| `3cad_baseline_n_s2`             | 3cad          | baseline seed 2   | completed | 0.2893   | 0.1861 | 0.2573 | --                 | baseline                                |
-| `dspcbsd_z1_dfl0_n_s0`           | dspcbsd       | `dfl=0`           | completed | 0.4752   | 0.3920 | 0.5462 | -0.0065 (-4.1×)    | inconclusive, datasets disagree         |
-| `3cad_z1_dfl0_n_s0`              | 3cad          | `dfl=0`           | completed | 0.2938   | 0.2012 | 0.3224 | +0.0087 (+0.47×)   | noise — Z1 closed                       |
-| `tianchifabirc_z1_dfl0_n_s0`     | tianchifabirc | `dfl=0`           | completed | 0.1925   | 0.1293 | 0.1792 | n/a (no floor)     | noise — Z1 closed                       |
-| `dspcbsd_z2_clspw05_n_s0`        | dspcbsd       | `cls_pw=0.5`      | completed | 0.4720   | 0.3874 | 0.5440 | -0.0111 (-6.9×)    | fail                                    |
-| `3cad_z2_clspw05_n_s0`           | 3cad          | `cls_pw=0.5`      | completed | 0.2719   | 0.1740 | 0.2530 | -0.0185 (-0.99×)   | fail (real evidence is mAP50-95, -4.5×) |
-| `tianchifabirc_z2_clspw05_n_s0`  | tianchifabirc | `cls_pw=0.5`      | completed | 0.1960   | 0.1274 | 0.1869 | n/a (no floor)     | fail                                    |
-| `3cad_z2_clspw10_n_s0`           | 3cad          | `cls_pw=1.0`      | completed | 0.2301   | 0.1507 | 0.2155 | -0.0418 (-2.24×)   | fail                                    |
-| `tianchifabirc_z2_clspw10_n_s0`  | tianchifabirc | `cls_pw=1.0`      | completed | 0.1998   | 0.1266 | 0.1928 | n/a (no floor)     | fail                                    |
-| `dspcbsd_z3_k6_n_s0`             | dspcbsd       | `k=6` downsample  | completed | 0.4812   | 0.4049 | 0.5431 | +0.0064 (+4.0×)    | **pass**                                |
-| `3cad_z3_k6_n_s0`                | 3cad          | `k=6` downsample  | completed | 0.3050   | 0.2186 | 0.2778 | +0.0261 (+1.40×)   | **mAP50-95 +3.4×; AP_S does not clear** |
-| `tianchifabirc_z3_k6_n_s0`       | tianchifabirc | `k=6` downsample  | completed | 0.1972   | 0.1190 | 0.2019 | n/a (no floor)     | no floor yet — 3v3 queued               |
-| `dspcbsd_z5_mosaic0_n_s0`        | dspcbsd       | `mosaic=0.0`      | completed | 0.4643   | 0.3873 | 0.5029 | -0.0112 (-7.0×)    | fail                                    |
-| `3cad_z5_mosaic0_n_s0`           | 3cad          | `mosaic=0.0`      | completed | 0.2632   | 0.1756 | 0.2532 | -0.0169 (-0.90×)   | fail (real evidence is mAP50-95, -6.6×) |
-| `tianchifabirc_z5_mosaic0_n_s0`  | tianchifabirc | `mosaic=0.0`      | completed | 0.1820   | 0.1142 | 0.1726 | n/a (no floor)     | fail                                    |
-| `dspcbsd_z7_imgsz960_n_s0`       | dspcbsd       | `imgsz=960`       | completed | 0.4831   | 0.4057 | 0.5637 | +0.0072 (+4.5×)    | reference, not a candidate              |
-| `3cad_z7_imgsz960_n_s0`          | 3cad          | `imgsz=960`       | completed | 0.3132   | 0.2827 | 0.2979 | +0.0902 (+4.82×)   | reference, not a candidate              |
-| `dspcbsd_m1_ir07_n_s0`           | dspcbsd       | `inner_ratio=0.7` | completed | 0.4796   | 0.3915 | 0.5500 | -0.0070 (-4.4×)    | fail                                    |
-| `dspcbsd_m1_ir08_n_s0`           | dspcbsd       | `inner_ratio=0.8` | completed | 0.4701   | 0.3857 | 0.5402 | -0.0128 (-8.0×)    | fail                                    |
-| `dspcbsd_m1_ir12_n_s0`           | dspcbsd       | `inner_ratio=1.2` | completed | 0.4771   | 0.4003 | 0.5377 | +0.0018 (+1.1×)    | fail (inside the floor)                 |
-| `dspcbsd_m3_topk22_n_s0`         | dspcbsd       | `o2o_topk2=2`     | completed | 0.3721   | 0.3185 | 0.3915 | -0.0800 (-50.0×)   | **structurally invalid**                |
-| `dspcbsd_m3_topk23_n_s0`         | dspcbsd       | `o2o_topk2=3`     | completed | 0.3184   | 0.2744 | 0.3340 | -0.1241 (-77.6×)   | **structurally invalid**                |
-| `dspcbsd_m3_topk24_n_s0`         | dspcbsd       | `o2o_topk2=4`     | completed | 0.2744   | 0.2415 | 0.2949 | -0.1570 (-98.1×)   | **structurally invalid**                |
-| `dspcbsd_z3_k6_n_s1`             | dspcbsd       | `k=6` seed 1      | completed | 0.4776   | 0.3997 | 0.5488 | +0.0041 (3v3 mean) | k=6 arm                                 |
-| `dspcbsd_z3_k6_n_s2`             | dspcbsd       | `k=6` seed 2      | completed | 0.4802   | 0.4033 | 0.5512 | +0.0041 (3v3 mean) | k=6 arm                                 |
-| `3cad_z3_k6_n_s1`                | 3cad          | `k=6` seed 1      | completed | 0.3004   | 0.2387 | 0.2884 | +0.0468 (3v3 mean) | k=6 arm                                 |
-| `3cad_z3_k6_n_s2`                | 3cad          | `k=6` seed 2      | completed | 0.3139   | 0.2607 | 0.2852 | +0.0468 (3v3 mean) | k=6 arm; read from results.csv          |
-| `3cad_z3xz7_k6_imgsz960_n_s0`    | 3cad          | `k=6` + `960`     | completed | 0.3254   | 0.2470 | --     | --                 | best 3cad mAP50-95 so far               |
-| `3cad_z7_imgsz960_n_s1`          | 3cad          | `imgsz=960` s1    | running   | --       | --     | --     | --                 | running                                 |
-| `3cad_z7_imgsz960_n_s2`          | 3cad          | `imgsz=960` s2    | running   | --       | --     | --     | --                 | running                                 |
-| `dspcbsd_z7_imgsz960_n_s1`       | dspcbsd       | `imgsz=960` s1    | completed | 0.4807   | 0.4159 | 0.5581 | --                 | completed                               |
-| `dspcbsd_z7_imgsz960_n_s2`       | dspcbsd       | `imgsz=960` s2    | completed | 0.4725   | 0.3930 | 0.5565 | --                 | completed                               |
-| `3cad_z3xz7_k6_imgsz960_n_s1`    | 3cad          | `k=6` + `960` s1  | queued    | --       | --     | --     | --                 | queued (GPU 6)                          |
-| `tianchifabirc_z7_imgsz960_n_s0` | tianchifabirc | `imgsz=960`       | queued    | --       | --     | --     | --                 | queued (GPU 7)                          |
-| `tianchifabirc_baseline_n_s1`    | tianchifabirc | baseline seed 1   | completed | 0.1891   | 0.1173 | 0.1782 | --                 | baseline                                |
-| `tianchifabirc_baseline_n_s2`    | tianchifabirc | baseline seed 2   | completed | 0.1898   | 0.1233 | 0.1826 | --                 | baseline                                |
-| `tianchifabirc_z3_k6_n_s1`       | tianchifabirc | `k=6` seed 1      | completed | 0.1957   | 0.1442 | 0.2004 | +0.0071 (3v3 mean) | k=6 arm — no harm, t=0.88               |
-| `tianchifabirc_z3_k6_n_s2`       | tianchifabirc | `k=6` seed 2      | completed | 0.1899   | 0.1241 | 0.1949 | +0.0071 (3v3 mean) | k=6 arm — no harm, t=0.88               |
+| run                              | dataset       | variable          | status    | mAP50-95 | AP_S   | AP_M   | ΔAP_S (×floor)      | verdict                                 |
+| -------------------------------- | ------------- | ----------------- | --------- | -------- | ------ | ------ | ------------------- | --------------------------------------- |
+| `dspcbsd_baseline_n_s0`          | dspcbsd       | baseline          | completed | 0.4737   | 0.3982 | 0.5437 | --                  | baseline                                |
+| `3cad_baseline_n_s0`             | 3cad          | baseline          | completed | 0.2900   | 0.1882 | 0.2699 | --                  | baseline                                |
+| `tianchifabirc_baseline_n_s0`    | tianchifabirc | baseline          | completed | 0.1936   | 0.1255 | 0.1870 | --                  | baseline                                |
+| `dspcbsd_baseline_n_s1`          | dspcbsd       | baseline seed 1   | completed | 0.4802   | 0.3979 | 0.5543 | --                  | baseline                                |
+| `3cad_baseline_n_s1`             | 3cad          | baseline seed 1   | completed | 0.2932   | 0.2032 | 0.2752 | --                  | baseline                                |
+| `dspcbsd_baseline_n_s2`          | dspcbsd       | baseline seed 2   | completed | 0.4756   | 0.3994 | 0.5516 | --                  | baseline                                |
+| `3cad_baseline_n_s2`             | 3cad          | baseline seed 2   | completed | 0.2893   | 0.1861 | 0.2573 | --                  | baseline                                |
+| `dspcbsd_z1_dfl0_n_s0`           | dspcbsd       | `dfl=0`           | completed | 0.4752   | 0.3920 | 0.5462 | -0.0065 (-4.1×)     | inconclusive, datasets disagree         |
+| `3cad_z1_dfl0_n_s0`              | 3cad          | `dfl=0`           | completed | 0.2938   | 0.2012 | 0.3224 | +0.0087 (+0.47×)    | noise — Z1 closed                       |
+| `tianchifabirc_z1_dfl0_n_s0`     | tianchifabirc | `dfl=0`           | completed | 0.1925   | 0.1293 | 0.1792 | n/a (no floor)      | noise — Z1 closed                       |
+| `dspcbsd_z2_clspw05_n_s0`        | dspcbsd       | `cls_pw=0.5`      | completed | 0.4720   | 0.3874 | 0.5440 | -0.0111 (-6.9×)     | fail                                    |
+| `3cad_z2_clspw05_n_s0`           | 3cad          | `cls_pw=0.5`      | completed | 0.2719   | 0.1740 | 0.2530 | -0.0185 (-0.99×)    | fail (real evidence is mAP50-95, -4.5×) |
+| `tianchifabirc_z2_clspw05_n_s0`  | tianchifabirc | `cls_pw=0.5`      | completed | 0.1960   | 0.1274 | 0.1869 | n/a (no floor)      | fail                                    |
+| `3cad_z2_clspw10_n_s0`           | 3cad          | `cls_pw=1.0`      | completed | 0.2301   | 0.1507 | 0.2155 | -0.0418 (-2.24×)    | fail                                    |
+| `tianchifabirc_z2_clspw10_n_s0`  | tianchifabirc | `cls_pw=1.0`      | completed | 0.1998   | 0.1266 | 0.1928 | n/a (no floor)      | fail                                    |
+| `dspcbsd_z3_k6_n_s0`             | dspcbsd       | `k=6` downsample  | completed | 0.4812   | 0.4049 | 0.5431 | +0.0064 (+4.0×)     | **pass**                                |
+| `3cad_z3_k6_n_s0`                | 3cad          | `k=6` downsample  | completed | 0.3050   | 0.2186 | 0.2778 | +0.0261 (+1.40×)    | **mAP50-95 +3.4×; AP_S does not clear** |
+| `tianchifabirc_z3_k6_n_s0`       | tianchifabirc | `k=6` downsample  | completed | 0.1972   | 0.1190 | 0.2019 | n/a (no floor)      | no floor yet — 3v3 queued               |
+| `dspcbsd_z5_mosaic0_n_s0`        | dspcbsd       | `mosaic=0.0`      | completed | 0.4643   | 0.3873 | 0.5029 | -0.0112 (-7.0×)     | fail                                    |
+| `3cad_z5_mosaic0_n_s0`           | 3cad          | `mosaic=0.0`      | completed | 0.2632   | 0.1756 | 0.2532 | -0.0169 (-0.90×)    | fail (real evidence is mAP50-95, -6.6×) |
+| `tianchifabirc_z5_mosaic0_n_s0`  | tianchifabirc | `mosaic=0.0`      | completed | 0.1820   | 0.1142 | 0.1726 | n/a (no floor)      | fail                                    |
+| `dspcbsd_z7_imgsz960_n_s0`       | dspcbsd       | `imgsz=960`       | completed | 0.4831   | 0.4057 | 0.5637 | +0.0072 (+4.5×)     | reference, not a candidate              |
+| `3cad_z7_imgsz960_n_s0`          | 3cad          | `imgsz=960`       | completed | 0.3132   | 0.2827 | 0.2979 | +0.0902 (+4.82×)    | reference, not a candidate              |
+| `dspcbsd_m1_ir07_n_s0`           | dspcbsd       | `inner_ratio=0.7` | completed | 0.4796   | 0.3915 | 0.5500 | -0.0070 (-4.4×)     | fail                                    |
+| `dspcbsd_m1_ir08_n_s0`           | dspcbsd       | `inner_ratio=0.8` | completed | 0.4701   | 0.3857 | 0.5402 | -0.0128 (-8.0×)     | fail                                    |
+| `dspcbsd_m1_ir12_n_s0`           | dspcbsd       | `inner_ratio=1.2` | completed | 0.4771   | 0.4003 | 0.5377 | +0.0018 (+1.1×)     | fail (inside the floor)                 |
+| `dspcbsd_m3_topk22_n_s0`         | dspcbsd       | `o2o_topk2=2`     | completed | 0.3721   | 0.3185 | 0.3915 | -0.0800 (-50.0×)    | **structurally invalid**                |
+| `dspcbsd_m3_topk23_n_s0`         | dspcbsd       | `o2o_topk2=3`     | completed | 0.3184   | 0.2744 | 0.3340 | -0.1241 (-77.6×)    | **structurally invalid**                |
+| `dspcbsd_m3_topk24_n_s0`         | dspcbsd       | `o2o_topk2=4`     | completed | 0.2744   | 0.2415 | 0.2949 | -0.1570 (-98.1×)    | **structurally invalid**                |
+| `dspcbsd_z3_k6_n_s1`             | dspcbsd       | `k=6` seed 1      | completed | 0.4776   | 0.3997 | 0.5488 | +0.0041 (3v3 mean)  | k=6 arm                                 |
+| `dspcbsd_z3_k6_n_s2`             | dspcbsd       | `k=6` seed 2      | completed | 0.4802   | 0.4033 | 0.5512 | +0.0041 (3v3 mean)  | k=6 arm                                 |
+| `3cad_z3_k6_n_s1`                | 3cad          | `k=6` seed 1      | completed | 0.3004   | 0.2387 | 0.2884 | +0.0468 (3v3 mean)  | k=6 arm                                 |
+| `3cad_z3_k6_n_s2`                | 3cad          | `k=6` seed 2      | completed | 0.3139   | 0.2607 | 0.2852 | +0.0468 (3v3 mean)  | k=6 arm; read from results.csv          |
+| `3cad_z3xz7_k6_imgsz960_n_s0`    | 3cad          | `k=6` + `960`     | completed | 0.3254   | 0.2470 | --     | --                  | best 3cad mAP50-95 so far               |
+| `3cad_z7_imgsz960_n_s1`          | 3cad          | `imgsz=960` s1    | running   | --       | --     | --     | --                  | running                                 |
+| `3cad_z7_imgsz960_n_s2`          | 3cad          | `imgsz=960` s2    | running   | --       | --     | --     | --                  | running                                 |
+| `dspcbsd_z7_imgsz960_n_s1`       | dspcbsd       | `imgsz=960` s1    | completed | 0.4807   | 0.4159 | 0.5581 | --                  | completed                               |
+| `dspcbsd_z7_imgsz960_n_s2`       | dspcbsd       | `imgsz=960` s2    | completed | 0.4725   | 0.3930 | 0.5565 | --                  | completed                               |
+| `3cad_z3xz7_k6_imgsz960_n_s1`    | 3cad          | `k=6` + `960` s1  | queued    | --       | --     | --     | --                  | queued (GPU 6)                          |
+| `tianchifabirc_z7_imgsz960_n_s0` | tianchifabirc | `imgsz=960`       | queued    | --       | --     | --     | --                  | queued (GPU 7)                          |
+| `tianchifabirc_baseline_n_s1`    | tianchifabirc | baseline seed 1   | completed | 0.1891   | 0.1173 | 0.1782 | --                  | baseline                                |
+| `tianchifabirc_baseline_n_s2`    | tianchifabirc | baseline seed 2   | completed | 0.1898   | 0.1233 | 0.1826 | --                  | baseline                                |
+| `tianchifabirc_z3_k6_n_s1`       | tianchifabirc | `k=6` seed 1      | completed | 0.1957   | 0.1442 | 0.2004 | +0.0071 (3v3 mean)  | k=6 arm — no harm, t=0.88               |
+| `tianchifabirc_z3_k6_n_s2`       | tianchifabirc | `k=6` seed 2      | completed | 0.1899   | 0.1241 | 0.1949 | +0.0071 (3v3 mean)  | k=6 arm — no harm, t=0.88               |
 | `coco_baseline_n_s0`             | coco          | baseline          | running   | --       | --     | --     | n/a (no coco floor) | baseline (n=1)                          |
 | `coco_z3_k6_n_s0`                | coco          | `k=6` downsample  | running   | --       | --     | --     | n/a (no coco floor) | k=6 arm                                 |
 | `coco_z3_k6_n_s1`                | coco          | `k=6` seed 1      | running   | --       | --     | --     | n/a (no coco floor) | k=6 arm                                 |
 | `coco_z3_k6_n_s2`                | coco          | `k=6` seed 2      | queued    | --       | --     | --     | n/a (no coco floor) | queued (GPU 6, after the 960 job)       |
-| `3cad_z1_dfl0_n_s1`              | 3cad          | `dfl=0` seed 1    | cancelled | --       | --     | --     | --                 | cancelled before start                  |
-| `3cad_z1_dfl0_n_s2`              | 3cad          | `dfl=0` seed 2    | cancelled | --       | --     | --     | --                 | cancelled before start                  |
+| `3cad_z1_dfl0_n_s1`              | 3cad          | `dfl=0` seed 1    | cancelled | --       | --     | --     | --                  | cancelled before start                  |
+| `3cad_z1_dfl0_n_s2`              | 3cad          | `dfl=0` seed 2    | cancelled | --       | --     | --     | --                  | cancelled before start                  |
 
+| `3cad_a1_ms16_n_s0` | 3cad | `tal_min_side=16` | running | -- | -- | -- | -- | screening, n=1 -- not evidence |
+| `3cad_a1_ms24_n_s0` | 3cad | `tal_min_side=24` | running | -- | -- | -- | -- | screening, n=1 -- not evidence |
+| `3cad_a2_rfla1_n_s0` | 3cad | `tal_prior=rfla` rf1 | running | -- | -- | -- | -- | screening, n=1 -- not evidence |
+| `3cad_a3_nwd10_n_s0` | 3cad | `tal_metric=nwd` g1.0 | running | -- | -- | -- | -- | screening, n=1 -- not evidence |
+| `3cad_a1_ms08_n_s0` | 3cad | `tal_min_side=8` | queued | -- | -- | -- | -- | screening, n=1 -- not evidence |
+| `3cad_a1_ms32_n_s0` | 3cad | `tal_min_side=32` | queued | -- | -- | -- | -- | screening, n=1 -- not evidence |
+| `3cad_a2_rfla4_n_s0` | 3cad | `tal_prior=rfla` rf4 | queued | -- | -- | -- | -- | screening, n=1 -- not evidence |
+| `3cad_a3_nwd20_n_s0` | 3cad | `tal_metric=nwd` g2.0 | queued | -- | -- | -- | -- | screening, n=1 -- not evidence |
+| `3cad_a3_nwd05_n_s0` | 3cad | `tal_metric=nwd` g0.5 | queued | -- | -- | -- | -- | screening, n=1 -- not evidence |
 Also on disk, excluded above because they carry no interpretable numbers: `smoke_{3cad,dspcbsd,tianchifabirc}_n`
 and `_n_v2` (Phase 0 data-loading checks) and `k6_donor` (the CPU job that builds the Z3 donor; `lsta`
 reports it FAILED, which is a misclassification — it writes no training completion marker).

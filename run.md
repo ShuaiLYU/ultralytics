@@ -1045,6 +1045,122 @@ checkpoints are unaffected. Note that `optimizer=auto` picks 8 param groups on 3
 column counts differ **between** datasets (25 vs 20) but are consistent **within** one — and every
 comparison on this branch is within a dataset.
 
+# Scale bands: what AP_small actually measures, and pinning it to letterbox-640
+
+## The images are rescaled before the model sees them, upward as well as downward
+
+`LetterBox(scaleup=False)` in the val transform (`dataset.py:318`) suggests small images are never enlarged.
+That reading is wrong. The resize happens earlier, in `BaseDataset.load_image` (`base.py:258`):
+
+```python
+r = self.imgsz / max(h0, w0)   # rect_mode
+if r != 1:                     # this branch enlarges as well as shrinks
+    im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+```
+
+By the time `LetterBox` runs the image already matches `imgsz`, so `scaleup=False` is a no-op. Every dataset
+on this branch is genuinely rescaled at both 640 and 960:
+
+| dataset       | image size | @640                  | @960                   |
+| ------------- | ---------- | --------------------- | ---------------------- |
+| dspcbsd       | 226x226    | r=2.83, area **x8.0** | r=4.25, area **x18.0** |
+| 3cad          | 1024x1024  | r=0.625, area x0.39   | r=0.938, area x0.88    |
+| tianchifabirc | 640x640    | r=1.0, area x1.0      | r=1.5, area x2.25      |
+
+dspcbsd is 1621 images at 226x226 plus 12 at 108x108; tianchifabirc is 1185 images all exactly 640x640;
+3cad is mostly 1024x1024 across 126 distinct sizes.
+
+## Band split in each frame
+
+`yolo2coco_gt` writes `area` from the **original** image dimensions (`converter.py:399-409`), so the reported
+AP_small/medium/large use original pixels against COCO's fixed 32^2 = 1024 and 96^2 = 9216 thresholds.
+
+| dataset       | frame         | small     | medium | large | area p50 | p10  | p90   |
+| ------------- | ------------- | --------- | ------ | ----- | -------- | ---- | ----- |
+| dspcbsd       | original      | 67.2%     | 28.9%  | 3.9%  | 400      | 96   | 2900  |
+| dspcbsd       | letterbox 640 | **16.2%** | 52.0%  | 31.8% | 3268     | 769  | 24243 |
+| dspcbsd       | letterbox 960 | 2.5%      | 52.4%  | 45.1% | 7354     | 1731 | 54547 |
+| 3cad          | original      | 42.6%     | 42.4%  | 14.9% | 1305     | 210  | 17112 |
+| 3cad          | letterbox 640 | **63.7%** | 27.8%  | 8.5%  | 536      | 86   | 6984  |
+| 3cad          | letterbox 960 | 45.8%     | 40.4%  | 13.8% | 1206     | 194  | 15715 |
+| tianchifabirc | original      | 60.3%     | 23.8%  | 15.9% | 401      | 97   | 26802 |
+| tianchifabirc | letterbox 640 | **60.3%** | 23.8%  | 15.9% | 401      | 97   | 26802 |
+| tianchifabirc | letterbox 960 | 51.7%     | 20.6%  | 27.6% | 903      | 219  | 60305 |
+
+Four consequences:
+
+1. **dspcbsd is not a small-object dataset.** In original pixels 67.2% of its boxes are "small", but the
+   model sees them enlarged 8x in area — only **16.2% are small and 31.8% are already large**. The reason
+   `imgsz=960` bought nothing there (Δ mAP50-95 +0.0023, p=0.59) is not that resolution fails to help; it is
+   that there was no small-object problem to fix.
+2. **3cad's small-object problem is manufactured by the letterbox.** It is the least small dataset in
+   original pixels (42.6%) and the most small at 640 (**63.7%**), because its 1024x1024 images are shrunk to
+   0.39x area. `imgsz=960` restores it to 45.8%. So `imgsz=960` on 3cad does not add information — **it
+   throws less away**, which is the mechanism behind its +0.0902 AP_small, the largest single move on this
+   branch.
+3. **An AP_small gain across `imgsz` does not mean the model got better at small objects.** The objects
+   stopped being small. The grouping is fixed, so the comparison is valid; the _interpretation_ "better at
+   small objects" is not.
+4. **Two different axes have been conflated.** COCO bands are absolute pixels; anchor starvation is relative
+   to image size. dspcbsd is absolutely-small but relatively-large (pool 55); 3cad is absolutely-medium but
+   relatively-tiny (pool 7). The starvation table and the AP_small column are not measuring the same thing
+   and must not be chained into one argument.
+
+## Decision: bands are pinned to the letterbox-640 frame
+
+Louis's call, and it is the right one. The options and why the others lose:
+
+| option                        | verdict                                                                                                 |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------- |
+| original pixels (what we had) | dataset-intrinsic, but describes difficulty wrongly — calls dspcbsd a small-object dataset              |
+| **letterbox-640, pinned**     | **chosen** — matches what the model resolves at the branch's locked baseline, fixed across arms         |
+| per-run `imgsz` frame         | **wrong**: the grouping would move with the arm, so "AP_small up" could just mean fewer boxes are small |
+| relative area (% of image)    | resolution-proof, but abandons the COCO convention and comparability with published numbers             |
+
+The load-bearing property is that the reference is **pinned at 640 and does not follow `args.imgsz`** — that
+is what keeps a 640 arm and a 960 arm comparable. Pinning also improves the statistics: under original
+pixels dspcbsd had only 124 large boxes (3.9%), which is why its AP_large floor was an unusable 0.2034; at
+letterbox-640 it has 513 / 1647 / 1007 boxes across the three bands and all three become usable.
+
+## How to implement it, verified
+
+Rescale **both** the GT boxes and the predictions by `640 / max(w, h)` per image. IoU is invariant under a
+similarity transform applied to both sides, so AP and AP50 are untouched and only the band assignment moves.
+Verified on `dspcbsd_baseline_n_s0` and `3cad_baseline_n_s0` — AP and AP50 come back **bit-identical**:
+
+```bash
+P=/Users/louis/workspace/ultra_louis_work/expman/data/pulled/yolo26-defect-bench
+python scripts/anomaly_bench/band_probe.py $P/dspcbsd_baseline_n_s0 640
+```
+
+```
+dspcbsd_baseline_n_s0  original frame: AP=0.473997 AP50=0.785642 S=0.398921 M=0.543504 L=0.396632
+dspcbsd_baseline_n_s0  letterbox-640:  AP=0.473997 AP50=0.785642 S=0.290170 M=0.426146 L=0.562433
+dspcbsd_baseline_n_s0  GT-area-only:   AP=0.473997 AP50=0.785642 S=0.112047 M=0.467612 L=0.682512
+3cad_baseline_n_s0     original frame: AP=0.291428 AP50=0.484480 S=0.187804 M=0.268588 L=0.417248
+3cad_baseline_n_s0     letterbox-640:  AP=0.291428 AP50=0.484480 S=0.166641 M=0.303539 L=0.396728
+```
+
+**The shortcut of rescaling only the GT `area` field is wrong** and the third line shows how wrong
+(S = 0.1120 against the correct 0.2902). COCO ignores an _unmatched_ detection whose own area falls outside
+the band, so false positives would be banded in the original frame while ground truth was banded in the
+letterbox frame. Both sides must be transformed.
+
+## Migration — not yet done, and it is not free
+
+Every AP_small/medium/large number above this line is in the **original-pixel** convention. Two constraints
+on restating them:
+
+- Runs already in flight are pinned by `--snap` to older commits, so a code change now cannot corrupt them.
+  The convention boundary would be the launch commit, and must be recorded per run.
+- `predictions.json` is overwritten every epoch, so an offline recompute yields **last-epoch** bands, while
+  every table here reports the **best** epoch. Restating the tables faithfully needs a val-only pass over
+  each `best.pt`, not a rerun of training.
+
+So the sequencing is: keep the current wave whole under the old convention, then re-validate `best.pt` for
+the arms that matter (baseline / `k=6` / `960` / `k6+960` across the three datasets) under the pinned bands.
+All four GPUs are occupied, so that pass is queued behind the running 960 runs, not started.
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status

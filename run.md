@@ -1106,14 +1106,44 @@ Four consequences:
    relatively-tiny (pool 7). The starvation table and the AP_small column are not measuring the same thing
    and must not be chained into one argument.
 
-## Decision: bands are pinned to the letterbox-640 frame
+## Decision: keep original pixels for now; letterbox-640 is understood but NOT adopted
 
-Louis's call, and it is the right one. The options and why the others lose:
+**Louis's call: no change. Every AP_small/medium/large on this branch stays in the original-pixel
+convention, and the caveat below is recorded instead.** Switching mid-programme would split the tables
+across two conventions and cost a val-only pass over every `best.pt` (see Migration). The analysis below is
+kept because it is what makes the existing numbers readable, not because anything was changed.
+
+### Caveat to carry with every dspcbsd AP_small number
+
+**dspcbsd images are 226x226** (1621 of 1633; the other 12 are 108x108). At `imgsz=640` `load_image`
+enlarges them 2.83x linear = **8.0x in area**, at 960 it is 4.25x / **18.0x**. So a dspcbsd box that COCO
+files as "small" by original pixels is presented to the network far larger than its nominal size — in the
+frame the model actually sees, only **16.2%** of dspcbsd boxes are small and **31.8% are already large**.
+
+Two things follow, and both matter for how the results here are read:
+
+1. **`dspcbsd AP_small` is not a small-object measurement.** It is a label attached to a set of boxes the
+   model mostly resolves as medium or large. Do not cite it as evidence about small-object behaviour, and do
+   not pool it with 3cad's AP_small as if the two measured the same regime.
+2. **Enlarging adds no information.** A 226px image resampled to 640 still carries 226px of real detail;
+   everything above native resolution is interpolation. So on dspcbsd `imgsz` is already saturated at the
+   baseline and 960 is interpolating an interpolation — which is the mechanism behind its null result
+   (Δ mAP50-95 +0.0023, p=0.59), not a failure of resolution as a lever.
+
+Generalising that to the whole benchmark: the useful ceiling for `imgsz` is each dataset's native size —
+226 for dspcbsd, 640 for tianchifabirc, 1024 for 3cad. **3cad is the only dataset whose native resolution
+exceeds the 640 baseline**, so it is the only one where raising `imgsz` recovers real detail rather than
+interpolating, and even there 960 is still below native. This predicts that `imgsz=1280` would add nothing
+anywhere, and that 3cad's remaining headroom from resolution alone stops at 1024.
+
+### The options, for when this is revisited
+
+Recorded for later; **none of these is in force today**.
 
 | option                        | verdict                                                                                                 |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| original pixels (what we had) | dataset-intrinsic, but describes difficulty wrongly — calls dspcbsd a small-object dataset              |
-| **letterbox-640, pinned**     | **chosen** — matches what the model resolves at the branch's locked baseline, fixed across arms         |
+| **original pixels**           | **in force** — dataset-intrinsic; describes difficulty wrongly, which the caveat above covers instead   |
+| letterbox-640, pinned         | the better definition, understood and validated, **not adopted** — see Migration for what it would cost |
 | per-run `imgsz` frame         | **wrong**: the grouping would move with the arm, so "AP_small up" could just mean fewer boxes are small |
 | relative area (% of image)    | resolution-proof, but abandons the COCO convention and comparability with published numbers             |
 
@@ -1122,7 +1152,9 @@ is what keeps a 640 arm and a 960 arm comparable. Pinning also improves the stat
 pixels dspcbsd had only 124 large boxes (3.9%), which is why its AP_large floor was an unusable 0.2034; at
 letterbox-640 it has 513 / 1647 / 1007 boxes across the three bands and all three become usable.
 
-## How to implement it, verified
+## How it would be implemented, already verified so the work is not lost
+
+Not applied. Recorded so that adopting it later is a code change, not a re-investigation.
 
 Rescale **both** the GT boxes and the predictions by `640 / max(w, h)` per image. IoU is invariant under a
 similarity transform applied to both sides, so AP and AP50 are untouched and only the band assignment moves.
@@ -1146,10 +1178,10 @@ dspcbsd_baseline_n_s0  GT-area-only:   AP=0.473997 AP50=0.785642 S=0.112047 M=0.
 the band, so false positives would be banded in the original frame while ground truth was banded in the
 letterbox frame. Both sides must be transformed.
 
-## Migration — not yet done, and it is not free
+## Migration — deliberately not done
 
-Every AP_small/medium/large number above this line is in the **original-pixel** convention. Two constraints
-on restating them:
+**Every AP_small/medium/large number on this branch is in the original-pixel convention, and stays that
+way.** The two constraints that make switching expensive, and that decided it:
 
 - Runs already in flight are pinned by `--snap` to older commits, so a code change now cannot corrupt them.
   The convention boundary would be the launch commit, and must be recorded per run.
@@ -1157,9 +1189,9 @@ on restating them:
   every table here reports the **best** epoch. Restating the tables faithfully needs a val-only pass over
   each `best.pt`, not a rerun of training.
 
-So the sequencing is: keep the current wave whole under the old convention, then re-validate `best.pt` for
-the arms that matter (baseline / `k=6` / `960` / `k6+960` across the three datasets) under the pinned bands.
-All four GPUs are occupied, so that pass is queued behind the running 960 runs, not started.
+If it is ever adopted, the pass is: re-validate `best.pt` for the arms that matter (baseline / `k=6` / `960`
+/ `k6+960` across the three datasets) with both sides rescaled — twelve val-only jobs, no retraining. Until
+then the caveat above is the mitigation, and `dspcbsd AP_small` must not be read as a small-object result.
 
 # EXPERIMENT INDEX — maintained, canonical
 
@@ -1230,6 +1262,10 @@ column is a significance claim until `tianchifabirc_baseline_n_s1/_s2` land.
 | `tianchifabirc_baseline_n_s2`    | tianchifabirc | baseline seed 2   | completed | 0.1898   | 0.1233 | 0.1826 | --                 | baseline                                |
 | `tianchifabirc_z3_k6_n_s1`       | tianchifabirc | `k=6` seed 1      | completed | 0.1957   | 0.1442 | 0.2004 | +0.0071 (3v3 mean) | k=6 arm — no harm, t=0.88               |
 | `tianchifabirc_z3_k6_n_s2`       | tianchifabirc | `k=6` seed 2      | completed | 0.1899   | 0.1241 | 0.1949 | +0.0071 (3v3 mean) | k=6 arm — no harm, t=0.88               |
+| `coco_baseline_n_s0`             | coco          | baseline          | running   | --       | --     | --     | n/a (no coco floor) | baseline (n=1)                          |
+| `coco_z3_k6_n_s0`                | coco          | `k=6` downsample  | running   | --       | --     | --     | n/a (no coco floor) | k=6 arm                                 |
+| `coco_z3_k6_n_s1`                | coco          | `k=6` seed 1      | running   | --       | --     | --     | n/a (no coco floor) | k=6 arm                                 |
+| `coco_z3_k6_n_s2`                | coco          | `k=6` seed 2      | queued    | --       | --     | --     | n/a (no coco floor) | queued (GPU 6, after the 960 job)       |
 | `3cad_z1_dfl0_n_s1`              | 3cad          | `dfl=0` seed 1    | cancelled | --       | --     | --     | --                 | cancelled before start                  |
 | `3cad_z1_dfl0_n_s2`              | 3cad          | `dfl=0` seed 2    | cancelled | --       | --     | --     | --                 | cancelled before start                  |
 

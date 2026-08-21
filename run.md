@@ -839,18 +839,26 @@ worth it.
 Eight of nine runs finished. With replicates on both arms the comparison finally becomes a two-sample test
 instead of one run against a floor, so these Welch t-tests supersede every floor-multiple reading above.
 
-| dataset       | metric   | k=6 (3 seeds)            | mean   | sd     | baseline mean | Δ           | t     | df  | 95%?        |
-| ------------- | -------- | ------------------------ | ------ | ------ | ------------- | ----------- | ----- | --- | ----------- |
-| dspcbsd       | mAP50-95 | 0.4812 / 0.4776 / 0.4802 | 0.4797 | 0.0019 | 0.4765        | **+0.0032** | +1.43 | 3.1 | no (>2.776) |
-| dspcbsd       | AP_small | 0.4049 / 0.3997 / 0.4033 | 0.4026 | 0.0027 | 0.3985        | **+0.0041** | +2.58 | 2.4 | no (>4.303) |
-| 3cad          | mAP50-95 | 0.3050 / 0.3004 / 0.3139 | 0.3064 | 0.0069 | 0.2908        | **+0.0156** | +3.77 | 2.4 | no, close   |
-| 3cad          | AP_small | 0.2186 / 0.2387 / 0.2607 | 0.2393 | 0.0211 | 0.1925        | **+0.0468** | +3.52 | 2.8 | no, close   |
-| tianchifabirc | mAP50-95 | 0.1972 / 0.1957 / 0.1899 | 0.1943 | 0.0039 | 0.1908        | **+0.0034** | +1.31 | 3.4 | no          |
-| tianchifabirc | AP_small | 0.1190 / 0.1442 / 0.1241 | 0.1291 | 0.0133 | 0.1220        | **+0.0071** | +0.88 | 2.4 | no          |
+| dataset       | metric   | k=6 (3 seeds)            | mean   | sd     | baseline mean | Δ           | t     | df   | p          | 95%?    |
+| ------------- | -------- | ------------------------ | ------ | ------ | ------------- | ----------- | ----- | ---- | ---------- | ------- |
+| dspcbsd       | mAP50-95 | 0.4812 / 0.4776 / 0.4802 | 0.4797 | 0.0019 | 0.4765        | **+0.0032** | +1.43 | 3.13 | 0.2434     | no      |
+| dspcbsd       | AP_small | 0.4049 / 0.3997 / 0.4033 | 0.4026 | 0.0027 | 0.3985        | **+0.0041** | +2.58 | 2.35 | 0.1049     | no      |
+| 3cad          | mAP50-95 | 0.3050 / 0.3004 / 0.3139 | 0.3064 | 0.0069 | 0.2908        | **+0.0156** | +3.77 | 2.36 | **0.0488** | **YES** |
+| 3cad          | AP_small | 0.2186 / 0.2387 / 0.2607 | 0.2393 | 0.0211 | 0.1925        | **+0.0468** | +3.52 | 2.76 | **0.0444** | **YES** |
+| tianchifabirc | mAP50-95 | 0.1972 / 0.1957 / 0.1899 | 0.1943 | 0.0039 | 0.1908        | **+0.0034** | +1.31 | 3.4  | 0.272      | no      |
+| tianchifabirc | AP_small | 0.1190 / 0.1442 / 0.1241 | 0.1291 | 0.0133 | 0.1220        | **+0.0071** | +0.88 | 2.4  | 0.458      | no      |
 
-**`k=6` is positive in all six dataset x metric cells.** No single cell clears 95% at n=3, but six positives
-out of six — three of three by dataset — is stronger evidence than any individual t. The consistency is the
-result; the individual tests are underpowered, not negative.
+> **Correction (was wrong when first written).** The two 3cad rows originally read "no, close". That came
+> from comparing t against critical values for the wrong degrees of freedom — 2.776 is the df=4 value and
+> 4.303 the df=2 value, while Welch gives fractional df of 2.36 and 2.76 here. Recomputed from the raw seed
+> values with `scipy.stats.ttest_ind(..., equal_var=False)`, **both 3cad cells clear 95%** (p = 0.0488 and
+> 0.0444). Read p directly; do not eyeball a t-table at fractional df.
+
+**`k=6` is positive in all six dataset x metric cells, and clears 95% on both 3cad metrics.** The other four
+cells do not clear at n=3. Six positives out of six is worth something on its own, but state it honestly: the
+two metrics within a dataset are correlated, so the naive 1/64 = 1.6% is too generous; treating the three
+datasets as independent gives 3/3 = **12.5%**, which on its own would not clear 95% either. The load-bearing
+evidence is 3cad; the rest is consistent direction with underpowered tests.
 
 Two corrections this forces, both to claims made earlier in this file:
 

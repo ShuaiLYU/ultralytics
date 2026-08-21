@@ -900,14 +900,37 @@ comparison needs the cost axis, not just AP. Params and FLOPs measured locally a
 an **activation** change (0 params, 2.25× the pixels through every layer). That is why `960` needed 47.8 GiB
 at `batch=128` against ~25 GiB for the rest, and why it must have a card to itself.
 
-Accuracy, against each dataset's 3-seed baseline mean:
+Accuracy. Baseline is the first row of every block so the four arms are read on one scale — absolute
+values, not just deltas. `sd` is across seeds; `n/a` means a single seed, which is the whole problem below.
 
-| dataset | metric   | `k=6` (n=3) | Δ       | `imgsz=960` (n=1) | Δ           | `k=6`+`960` (n=1) | Δ       |
-| ------- | -------- | ----------- | ------- | ----------------- | ----------- | ----------------- | ------- |
-| 3cad    | mAP50-95 | 0.3064      | +0.0156 | 0.3132            | +0.0224     | **0.3254**        | +0.0346 |
-| 3cad    | AP_small | 0.2393      | +0.0468 | **0.2827**        | **+0.0902** | 0.2470            | +0.0545 |
-| dspcbsd | mAP50-95 | 0.4797      | +0.0032 | 0.4831            | +0.0066     | --                | --      |
-| dspcbsd | AP_small | 0.4026      | +0.0041 | 0.4057            | +0.0072     | --                | --      |
+**3cad** — the dataset where both changes actually do something
+
+| arm         | n   | GFLOPs | mAP50-95   | sd     | Δ           | AP_small   | sd     | Δ           |
+| ----------- | --- | ------ | ---------- | ------ | ----------- | ---------- | ------ | ----------- |
+| baseline    | 3   | 3.04   | 0.2908     | 0.0021 | --          | 0.1925     | 0.0093 | --          |
+| `k=6`       | 3   | 4.10   | 0.3064     | 0.0069 | +0.0156     | 0.2393     | 0.0211 | +0.0468     |
+| `960`       | 1   | 7.01   | 0.3132     | n/a    | +0.0224     | **0.2827** | n/a    | **+0.0902** |
+| `k=6`+`960` | 1   | 9.40   | **0.3254** | n/a    | **+0.0346** | 0.2470     | n/a    | +0.0545     |
+
+**dspcbsd** — near saturation, everything is small
+
+| arm      | n   | GFLOPs | mAP50-95   | sd     | Δ           | AP_small   | sd     | Δ           |
+| -------- | --- | ------ | ---------- | ------ | ----------- | ---------- | ------ | ----------- |
+| baseline | 3   | 3.04   | 0.4765     | 0.0033 | --          | 0.3985     | 0.0008 | --          |
+| `k=6`    | 3   | 4.10   | 0.4797     | 0.0019 | +0.0032     | 0.4026     | 0.0027 | +0.0041     |
+| `960`    | 1   | 7.01   | **0.4831** | n/a    | **+0.0066** | **0.4057** | n/a    | **+0.0072** |
+
+**tianchifabirc** — `960` still queued, no combination run
+
+| arm      | n   | GFLOPs | mAP50-95   | sd     | Δ       | AP_small   | sd     | Δ       |
+| -------- | --- | ------ | ---------- | ------ | ------- | ---------- | ------ | ------- |
+| baseline | 3   | 3.04   | 0.1908     | 0.0024 | --      | 0.1220     | 0.0042 | --      |
+| `k=6`    | 3   | 4.10   | **0.1943** | 0.0039 | +0.0034 | **0.1291** | 0.0133 | +0.0071 |
+
+Reading across the three blocks: the arms rank **baseline < `k=6` < `960`** on every metric of every dataset
+measured so far, and the spread between them tracks how much headroom the dataset has — large on 3cad,
+negligible on dspcbsd, unmeasurable on tianchifabirc. `k=6`+`960` is the only arm that breaks the ranking,
+and it breaks it on AP_small only.
 
 **Gain per extra GFLOP** — `k=6` costs +1.06 GFLOPs, `960` costs +3.97:
 
@@ -922,10 +945,10 @@ The pattern is consistent across all four cells: **`960` wins on absolute AP, `k
 `960` buys roughly twice the gain for roughly four times the extra compute.
 
 **Is this enough to conclude? No — every `960` number above is a single seed.** This section must not repeat
-the mistake the section above had to correct twice. Concretely, on 3cad AP_small the gap between `960`
+the mistake the section above had to correct twice. Concretely, on 3cad AP*small the gap between `960`
 (0.2827) and the `k=6` 3-seed mean (0.2393) is 0.0434, which is **2.06× `k=6`'s own seed sd of 0.0211**. A
 single draw from a distribution that wide cannot be compared to a 3-seed mean, and `960`'s own sd is unknown.
-The _ordering_ is probably safe; the _magnitude_, and therefore the whole efficiency ratio, is not pinned.
+The \_ordering* is probably safe; the _magnitude_, and therefore the whole efficiency ratio, is not pinned.
 
 **The combination is the sharpest warning.** `k=6`+`960` beats both on mAP50-95 (0.3254, close to the
 additive prediction 0.2908+0.0156+0.0224 = 0.3288) but on AP_small lands at 0.2470 — **below `960` alone**.

@@ -422,14 +422,14 @@ $EXP launch --snap --args "nohupyolo --after dspcbsd_z7_imgsz960_n_s0 train data
 $EXP launch --snap --args "nohupyolo --after tianchifabirc_z2_clspw05_n_s0 train data=$D/tianchifabirc/data.yaml model=yolo26n.pt epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True cls_pw=1.0 device=7 project=$P name=tianchifabirc_z2_clspw10_n_s0"
 ```
 
-| queued run                   | waits on (PID → run)        | variable      | GPU |
-| ---------------------------- | --------------------------- | ------------- | --- |
-| `dspcbsd_z2_clspw05_n_s0`    | 3095507 `dspcbsd_z3_k6`     | cls_pw=0.5    | 5   |
-| `tianchifabirc_z3_k6_n_s0`   | 3122342 `3cad_z3_k6`        | k=6           | 6   |
-| `tianchifabirc_z5_mosaic0`   | 3069100 `tianchifabirc_z1`  | mosaic=0.0    | 4   |
-| `dspcbsd_z5_mosaic0_n_s0`    | 3070978 `dspcbsd_z1`        | mosaic=0.0    | 4   |
-| `3cad_z7_imgsz960_n_s0`      | 3120263 `dspcbsd_z7_960`    | imgsz=960     | 6   |
-| `tianchifabirc_z2_clspw10`   | 3125776 `tianchifabirc_z2_05` | cls_pw=1.0  | 7   |
+| queued run                 | waits on (PID → run)          | variable   | GPU |
+| -------------------------- | ----------------------------- | ---------- | --- |
+| `dspcbsd_z2_clspw05_n_s0`  | 3095507 `dspcbsd_z3_k6`       | cls_pw=0.5 | 5   |
+| `tianchifabirc_z3_k6_n_s0` | 3122342 `3cad_z3_k6`          | k=6        | 6   |
+| `tianchifabirc_z5_mosaic0` | 3069100 `tianchifabirc_z1`    | mosaic=0.0 | 4   |
+| `dspcbsd_z5_mosaic0_n_s0`  | 3070978 `dspcbsd_z1`          | mosaic=0.0 | 4   |
+| `3cad_z7_imgsz960_n_s0`    | 3120263 `dspcbsd_z7_960`      | imgsz=960  | 6   |
+| `tianchifabirc_z2_clspw10` | 3125776 `tianchifabirc_z2_05` | cls_pw=1.0 | 7   |
 
 All six are `status=queued`, `.status` files record `Waiting for: PID <n> to exit, then +20s settle`.
 `3cad_z7_imgsz960` (~48 GB) chains onto the other 48 GB `imgsz=960` job on the same card, so the big
@@ -444,3 +444,101 @@ free card): Z6 `scale=0.2` (after Z5), the `dfl` sweep (after Z1), Z4 (held by L
 - `lsta` reports the `k6_donor` utility job as **FAILED**. It succeeded; the classifier looks for
   Ultralytics' training completion marker, which a non-training script never writes. Its log is the
   authority.
+
+---
+
+# Phase B results — the zero-code wave, all 21 runs complete
+
+Snap `20b6e886f0c2` / `bca283c87ec2` (package code byte-identical). `yolo26n`, 100 epochs, `imgsz=640`,
+`batch=128`, `seed=0`, `coco_eval=True`. Baselines: `dspcbsd` = 3-seed mean, `3cad` and `tianchifabirc` =
+seed 0.
+
+## Per-metric noise floors, and why they change the readout
+
+From the three `dspcbsd` baseline seeds, per metric:
+
+| metric       | mean   | spread | sd     | **2sd = threshold** |
+| ------------ | ------ | ------ | ------ | ------------------- |
+| mAP50        | 0.7982 | 0.0210 | 0.0105 | 0.0210              |
+| mAP50-95     | 0.4765 | 0.0065 | 0.0033 | **0.0067**          |
+| **AP_small** | 0.3985 | 0.0015 | 0.0008 | **0.0016**          |
+| AP_medium    | 0.5499 | 0.0106 | 0.0055 | 0.0110              |
+| AP_large     | 0.5126 | 0.1771 | 0.1017 | 0.2034              |
+
+Two consequences, both of which change how this benchmark should be read:
+
+- **AP_small is 4x tighter than mAP50-95, so it is the better judging metric, not just the mechanism
+  check.** Every candidate on the list targets small objects, and total mAP50-95 barely registers what they
+  do: Z3 moves AP_small by +4.0x its floor on `dspcbsd` while moving mAP50-95 by only +0.7x. Judging on
+  mAP50-95 alone would have scored the one change that works as "no measurable difference".
+- **AP_large is unusable on `dspcbsd`** (2sd = 0.2034). Too few large boxes; that column is noise. Any
+  conclusion quoting it is fictional.
+
+## Results — delta vs baseline, in multiples of the 2sd floor
+
+| change          | dataset       | mAP50-95            | AP_small             | AP_medium           |
+| --------------- | ------------- | ------------------- | -------------------- | ------------------- |
+| Z1 `dfl=0`      | dspcbsd       | -0.0013 (-0.2x)     | **-0.0065 (-4.1x)**  | -0.0037 (-0.3x)     |
+|                 | 3cad          | +0.0038 (+0.6x)     | **+0.0130 (+8.1x)**  | **+0.0525 (+4.8x)** |
+|                 | tianchifabirc | -0.0011 (-0.2x)     | +0.0038 (+2.4x)      | -0.0078 (-0.7x)     |
+| Z2 `cls_pw=0.5` | dspcbsd       | -0.0045 (-0.7x)     | **-0.0111 (-6.9x)**  | -0.0059 (-0.5x)     |
+|                 | 3cad          | -0.0181 (-2.7x)     | **-0.0142 (-8.9x)**  | -0.0169 (-1.5x)     |
+|                 | tianchifabirc | +0.0024 (+0.4x)     | +0.0019 (+1.2x)      | -0.0001 (-0.0x)     |
+| Z2 `cls_pw=1.0` | 3cad          | **-0.0599 (-8.9x)** | **-0.0375 (-23.4x)** | **-0.0544 (-4.9x)** |
+|                 | tianchifabirc | +0.0062 (+0.9x)     | +0.0011 (+0.7x)      | +0.0058 (+0.5x)     |
+| **Z3 `k=6`**    | dspcbsd       | +0.0047 (+0.7x)     | **+0.0064 (+4.0x)**  | -0.0068 (-0.6x)     |
+|                 | 3cad          | **+0.0150 (+2.2x)** | **+0.0304 (+19.0x)** | +0.0079 (+0.7x)     |
+|                 | tianchifabirc | +0.0036 (+0.5x)     | **-0.0065 (-4.1x)**  | +0.0149 (+1.4x)     |
+| Z5 `mosaic=0`   | dspcbsd       | -0.0122 (-1.8x)     | **-0.0112 (-7.0x)**  | **-0.0470 (-4.3x)** |
+|                 | 3cad          | **-0.0268 (-4.0x)** | **-0.0126 (-7.9x)**  | -0.0167 (-1.5x)     |
+|                 | tianchifabirc | -0.0116 (-1.7x)     | **-0.0113 (-7.1x)**  | -0.0144 (-1.3x)     |
+| Z7 `imgsz=960`  | dspcbsd       | +0.0066 (+1.0x)     | **+0.0072 (+4.5x)**  | +0.0138 (+1.3x)     |
+|                 | 3cad          | **+0.0232 (+3.5x)** | **+0.0945 (+59.1x)** | **+0.0280 (+2.5x)** |
+
+Absolute values for every run are in `expman/data/workspaces/yolo26-defect-bench.json` under
+`train_metrics`; the columns are `metrics/{mAP50,mAP50-95}(B)` and
+`metrics/mAP_{small,medium,large}(B-coco)`.
+
+## Verdicts
+
+**Z3 (`k=6` early downsampling) — the only change that passes.** AP_small +4.0x on `dspcbsd` and +19.0x on
+`3cad`, both far past the floor, so the "agrees on at least two of three datasets" rule is met.
+`tianchifabirc` disagrees on AP_small (-4.1x) while its AP_medium rises (+1.4x) and total mAP50-95 is flat,
+so it is a shift in size sensitivity there, not a collapse. The attribution is clean: the donor makes the
+run start bit-identical to the baseline (`Transferred 606/708` on both `dspcbsd` and `3cad`), so the only
+difference is kernel 3 -> 6. Cost is +4.8% parameters and no latency penalty, since it is one conv.
+
+**Z5 (`mosaic=0`) — fails, and the hypothesis was backwards.** All three datasets get worse, AP_small
+-7.0x / -7.9x / -7.1x, remarkably consistent. The reasoning was that mosaic downscales and would destroy
+defects already at the resolution limit. The data says mosaic's regularization and context diversity are
+worth much more than the downscaling costs, on every dataset here. Line closed.
+
+**Z2 (`cls_pw`) — closed.** Monotone damage on `3cad` (`0.5` -> -8.9x, `1.0` -> -23.4x AP_small). A
+dose-response relation that clean is not noise. No effect on `tianchifabirc`. Inverse-frequency class
+weighting is useless or harmful on this benchmark.
+
+**Z1 (`dfl=0`) — no conclusion; the datasets disagree.** `dspcbsd` AP_small -4.1x against `3cad` +8.1x.
+Total mAP50-95 shows nothing anywhere. So the L1-on-ltrb term helps small objects on PCB data and hurts
+them on 3CAD, and its overall contribution is invisible.
+
+**Z7 (`imgsz=960`) — the reference measurement, and it reorders the cost-benefit:**
+
+| lever              | AP_small on dspcbsd | cost                     |
+| ------------------ | ------------------- | ------------------------ |
+| `imgsz` 640 -> 960 | +0.0072             | compute 2.25x            |
+| kernel 3 -> 6      | +0.0064             | +4.8% params, no latency |
+
+Nearly the same gain for an order of magnitude difference in cost. But on `3cad` resolution gives +0.0945
+(59x), three times what `k=6` gives, which says `3cad`'s tiny defects are **resolution-limited rather than
+architecture-limited**. On data like that, input resolution caps what any architectural trick can reach —
+worth knowing before spending runs on architecture there.
+
+## Consequences for the plan
+
+- **M2 (NWD) is downgraded.** Its gate was Z1, and Z1 came back contradictory rather than permissive. On
+  top of that, CIoU already contains a normalized centre-distance term (`rho2/c2`) and an aspect term
+  (`v`), which are the two things NWD's `W2^2` adds. Weak prior, no supporting evidence, expensive to tune
+  (`C` is dataset-specific). Not next.
+- **M1 (Inner-IoU) and M3 (o2o `topk2`) are next**, being cheap and independent of Z1.
+- `3cad` seeds 1 and 2 launched, because the two largest signals on the board (Z1 +8.1x, Z3 +19.0x
+  AP_small) are both on the one dataset with no replicates, so neither can be called significant yet.

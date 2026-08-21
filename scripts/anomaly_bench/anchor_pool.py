@@ -40,9 +40,9 @@ def pool_sizes(boxes: list[tuple[float, float]], min_side: float | None = None, 
     return c
 
 
-def report(tag: str, boxes: list[tuple[float, float]], topk: int, min_side: float | None) -> None:
+def report(tag: str, boxes: list[tuple[float, float]], topk: int, min_side: float | None, strides=STRIDES) -> None:
     """Print the pool distribution for one (imgsz, min_side) cell."""
-    c = pool_sizes(boxes, min_side)
+    c = pool_sizes(boxes, min_side, strides)
     n = sum(c.values())
     starved = sum(v for k, v in c.items() if k < topk)
     med = sorted(k for k, v in c.items() for _ in range(v))[n // 2]
@@ -61,20 +61,22 @@ def main() -> None:
     ap.add_argument("--imgsz", type=int, nargs="+", default=[640, 960])
     ap.add_argument("--topk", type=int, default=10, help="o2m tal_topk to compare the pool against")
     ap.add_argument("--min-side", type=float, nargs="+", help="tal_min_side doses to sweep; omit for the legacy clamp")
+    ap.add_argument("--strides", type=int, nargs="+", default=list(STRIDES), help="detection strides, e.g. 4 8 16 32")
     args = ap.parse_args()
 
+    strides = tuple(sorted(args.strides))
     gt = json.loads(args.gt.read_text())
     dims = {i["id"]: max(i["width"], i["height"]) for i in gt["images"]}
     raw = [(a["bbox"][2], a["bbox"][3], dims[a["image_id"]]) for a in gt["annotations"]]
-    print(f"{args.gt.parent.name}: {len(raw)} GT boxes")
+    print(f"{args.gt.parent.name}: {len(raw)} GT boxes, strides={strides}")
 
     for imgsz in args.imgsz:
         boxes = [(w * imgsz / d, h * imgsz / d) for w, h, d in raw]
-        band = sum(STRIDES[0] <= min(w, h) < STRIDES[1] for w, h in boxes)
-        print(f"  imgsz={imgsz:4d}  short side in [{STRIDES[0]}, {STRIDES[1]}) px: {100 * band / len(boxes):5.1f}%")
-        report(f"imgsz={imgsz:4d}  min_side=legacy", boxes, args.topk, None)
+        band = sum(strides[0] <= min(w, h) < strides[1] for w, h in boxes)
+        print(f"  imgsz={imgsz:4d}  short side in [{strides[0]}, {strides[1]}) px: {100 * band / len(boxes):5.1f}%")
+        report(f"imgsz={imgsz:4d}  min_side=legacy", boxes, args.topk, None, strides)
         for ms in args.min_side or []:
-            report(f"imgsz={imgsz:4d}  min_side={ms:6.1f}", boxes, args.topk, ms)
+            report(f"imgsz={imgsz:4d}  min_side={ms:6.1f}", boxes, args.topk, ms, strides)
 
 
 if __name__ == "__main__":

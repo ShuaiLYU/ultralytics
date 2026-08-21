@@ -616,6 +616,101 @@ real effect.
 
 ---
 
+# Phase B results — M1 fails, M3 is structurally invalid, and the reason reframes the whole plan
+
+All six runs finished. Judged against the `dspcbsd` 2sd floors (AP_small 0.0016, mAP50-95 0.0067) and the
+three-seed baseline means (mAP50-95 0.4765, AP_small 0.3985, AP_medium 0.5499).
+
+| run                      | variable          | mAP50  | mAP50-95 | AP_S   | ΔAP_S (×floor)   |
+| ------------------------ | ----------------- | ------ | -------- | ------ | ---------------- |
+| baseline mean (3 seeds)  | --                | 0.7982 | 0.4765   | 0.3985 | --               |
+| `dspcbsd_m1_ir07_n_s0`   | `inner_ratio=0.7` | 0.8059 | 0.4796   | 0.3915 | -0.0070 (-4.4×)  |
+| `dspcbsd_m1_ir08_n_s0`   | `inner_ratio=0.8` | 0.7950 | 0.4701   | 0.3857 | -0.0128 (-8.0×)  |
+| `dspcbsd_m1_ir12_n_s0`   | `inner_ratio=1.2` | 0.8001 | 0.4771   | 0.4003 | +0.0018 (+1.1×)  |
+| `dspcbsd_m3_topk22_n_s0` | `o2o_topk2=2`     | 0.6226 | 0.3721   | 0.3185 | -0.0800 (-50.0×) |
+| `dspcbsd_m3_topk23_n_s0` | `o2o_topk2=3`     | 0.5168 | 0.3184   | 0.2744 | -0.1241 (-77.6×) |
+| `dspcbsd_m3_topk24_n_s0` | `o2o_topk2=4`     | 0.4742 | 0.2744   | 0.2415 | -0.1570 (-98.1×) |
+
+**M1 (Inner-IoU): fail.** On mAP50-95 every setting is inside the floor (+0.5×, -1.0×, +0.1×) — a no-op. On
+AP_small, shrinking the auxiliary box (`ratio < 1`) costs 4.4-8.0× the floor, and expanding it (`ratio = 1.2`)
+lands inside the floor. Nothing here is worth carrying. The paper's mechanism is faster convergence on
+high-IoU pairs; at 100 epochs these runs are converged, so there is no gap for it to close.
+
+## M3 is not a bad hyperparameter, it is an invalid one — and the proof is cheap
+
+`o2o_topk2` raises the positive count on the **one-to-one** head. That head is what runs at inference, with
+no NMS. Training it to fire k times per object means k boxes per object reach the output. Precision reads as
+0.7995 -> 0.5482 -> 0.4608 -> 0.4536 for topk2 = 1, 2, 3, 4 while recall barely moves
+(0.7371 -> 0.6478 -> 0.6254 -> 0.5304): the classic duplicate signature, and `P ~= 0.52` at `topk2=2` is
+suspiciously close to 1/2. The trajectory plateaus rather than diverging, so this is a ceiling, not instability.
+
+Proved on the saved `predictions.json`, no GPU needed — post-hoc class-wise NMS at the same `iou=0.7`:
+
+```bash
+expman-cli pull yolo26-defect-bench yolo26-defect-bench__dspcbsd_m3_topk22_n_s0 --what all
+expman-cli pull yolo26-defect-bench yolo26-defect-bench__dspcbsd_baseline_n_s0  --what all
+P=/Users/louis/workspace/ultra_louis_work/expman/data/pulled/yolo26-defect-bench
+python runs/tests/nms_probe.py $P/dspcbsd_baseline_n_s0 $P/dspcbsd_m3_topk22_n_s0
+```
+
+```
+dspcbsd_baseline_n_s0  (23003 dets -> 14230 after NMS, 38.1% removed)
+  raw    mAP50-95=0.4740  mAP50=0.7856  AP_S=0.3989  AP_M=0.5435  AP_L=0.3966
+  +NMS   mAP50-95=0.4763  mAP50=0.8041  AP_S=0.4004  AP_M=0.5475  AP_L=0.4033
+
+dspcbsd_m3_topk22_n_s0  (77867 dets -> 33508 after NMS, 57.0% removed)
+  raw    mAP50-95=0.3736  mAP50=0.6224  AP_S=0.3189  AP_M=0.3899  AP_L=0.4190
+  +NMS   mAP50-95=0.4416  mAP50=0.7786  AP_S=0.3733  AP_M=0.4662  AP_L=0.4634
+```
+
+`topk2=2` emits **3.4x** the boxes for the same 3167 objects. NMS recovers mAP50 0.6224 -> 0.7786, which is
+0.156 of the 0.163 gap to the baseline's NMS'd 0.8041 — **96% of the loss was duplicates**. The residual
+AP_small gap after NMS (0.3733 vs 0.4004) is the small real feature cost.
+
+So `topk2=1` on the o2o head is not a tunable hyperparameter, it is the NMS-free contract. **M3 is closed
+permanently**, and the design doc's premise — widen small-target positive coverage via `topk2` — was aimed at
+the wrong head. The `o2o_topk2` knob stays in `default.yaml` because it is one line and documents the trap.
+
+## The measurement that reframes the plan: anchor starvation
+
+If positive coverage matters, the lever must sit on the **one-to-many** head (`tal_topk=10`), which is
+discarded at inference. But `topk` only binds when more than 10 anchors are eligible at all —
+`TaskAlignedAssigner.select_candidates_in_gts` keeps only anchors whose centre falls inside the GT box. So
+measure the pool directly, from the `gt_val.json` that `coco_eval` already writes:
+
+```bash
+P=/Users/louis/workspace/ultra_louis_work/expman/data/pulled/yolo26-defect-bench
+python runs/tests/anchor_pool.py $P/3cad_baseline_n_s0/gt_val.json    --imgsz 640 960 1280
+python runs/tests/anchor_pool.py $P/dspcbsd_baseline_n_s0/gt_val.json --imgsz 640 960 1280
+```
+
+| dataset | levels    | imgsz | median pool | pool < topk(10) | pool <= 1 |
+| ------- | --------- | ----- | ----------- | --------------- | --------- |
+| 3cad    | P3-P5     | 640   | 7           | 55.0%           | 19.1%     |
+| 3cad    | P3-P5     | 960   | 17          | 36.0%           | 9.4%      |
+| 3cad    | P3-P5     | 1280  | 35          | 21.6%           | 3.7%      |
+| 3cad    | **P2**-P5 | 640   | 35          | 21.6%           | 3.7%      |
+| dspcbsd | P3-P5     | 640   | 55          | 6.7%            | 0.1%      |
+| dspcbsd | P3-P5     | 960   | 134         | 0.3%            | 0.0%      |
+| dspcbsd | **P2**-P5 | 640   | 254         | 0.1%            | 0.0%      |
+
+This explains the entire results table so far:
+
+- **On 3cad, 55% of objects are anchor-starved and 19% get at most one anchor.** No loss-side knob can
+  reweight positives that do not exist, which is why `dfl`, `cls_pw`, Inner-IoU and `topk2` all came back
+  neutral-to-harmful there — and why `imgsz=960` was the single biggest AP_small move on the whole branch
+  (+0.0945, ~50% relative).
+- **On dspcbsd the pool is already 55 with only 6.7% starved**, so `imgsz=960` bought almost nothing
+  (+0.0072). Nothing to fix.
+- Raising o2m `tal_topk` above 10 would therefore be a near-no-op on dspcbsd (pool 55 > 10 for 93% of boxes,
+  assignment does change) but would still not reach the 55% of 3cad boxes that cannot supply 10 anchors.
+
+**A P2 head at `imgsz=640` matches `imgsz=1280` on starvation (median 35, 21.6% starved) at far lower cost.**
+That makes Z4 the highest-value untested candidate, and it moves the plan off loss knobs and onto
+stride/resolution. Z4 is held by Louis.
+
+Two probes kept, both CPU-only and both reusable: `runs/tests/nms_probe.py` and `runs/tests/anchor_pool.py`.
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status
@@ -656,12 +751,12 @@ noise floor of 0.0016** measured on `dspcbsd`. Only `dspcbsd` has seed replicate
 | `tianchifabirc_z5_mosaic0_n_s0` | tianchifabirc | `mosaic=0.0`      | completed | 0.1820   | 0.1142 | 0.1726 | -0.0113 (-7.1×)  | fail                            |
 | `dspcbsd_z7_imgsz960_n_s0`      | dspcbsd       | `imgsz=960`       | completed | 0.4831   | 0.4057 | 0.5637 | +0.0072 (+4.5×)  | reference, not a candidate      |
 | `3cad_z7_imgsz960_n_s0`         | 3cad          | `imgsz=960`       | completed | 0.3132   | 0.2827 | 0.2979 | +0.0945 (+59.1×) | reference, not a candidate      |
-| `dspcbsd_m1_ir07_n_s0`          | dspcbsd       | `inner_ratio=0.7` | running   | --       | --     | --     | --               | running                         |
-| `dspcbsd_m1_ir08_n_s0`          | dspcbsd       | `inner_ratio=0.8` | running   | --       | --     | --     | --               | running                         |
-| `dspcbsd_m1_ir12_n_s0`          | dspcbsd       | `inner_ratio=1.2` | running   | --       | --     | --     | --               | running                         |
-| `dspcbsd_m3_topk22_n_s0`        | dspcbsd       | `o2o_topk2=2`     | running   | --       | --     | --     | --               | running                         |
-| `dspcbsd_m3_topk23_n_s0`        | dspcbsd       | `o2o_topk2=3`     | running   | --       | --     | --     | --               | running                         |
-| `dspcbsd_m3_topk24_n_s0`        | dspcbsd       | `o2o_topk2=4`     | running   | --       | --     | --     | --               | running                         |
+| `dspcbsd_m1_ir07_n_s0`          | dspcbsd       | `inner_ratio=0.7` | completed | 0.4796   | 0.3915 | 0.5500 | -0.0070 (-4.4×)  | fail                            |
+| `dspcbsd_m1_ir08_n_s0`          | dspcbsd       | `inner_ratio=0.8` | completed | 0.4701   | 0.3857 | 0.5402 | -0.0128 (-8.0×)  | fail                            |
+| `dspcbsd_m1_ir12_n_s0`          | dspcbsd       | `inner_ratio=1.2` | completed | 0.4771   | 0.4003 | 0.5377 | +0.0018 (+1.1×)  | fail (inside the floor)         |
+| `dspcbsd_m3_topk22_n_s0`        | dspcbsd       | `o2o_topk2=2`     | completed | 0.3721   | 0.3185 | 0.3915 | -0.0800 (-50.0×) | **structurally invalid**        |
+| `dspcbsd_m3_topk23_n_s0`        | dspcbsd       | `o2o_topk2=3`     | completed | 0.3184   | 0.2744 | 0.3340 | -0.1241 (-77.6×) | **structurally invalid**        |
+| `dspcbsd_m3_topk24_n_s0`        | dspcbsd       | `o2o_topk2=4`     | completed | 0.2744   | 0.2415 | 0.2949 | -0.1570 (-98.1×) | **structurally invalid**        |
 
 Also on disk, excluded above because they carry no interpretable numbers: `smoke_{3cad,dspcbsd,tianchifabirc}_n`
 and `_n_v2` (Phase 0 data-loading checks) and `k6_donor` (the CPU job that builds the Z3 donor; `lsta`
@@ -671,9 +766,11 @@ reports it FAILED, which is a misclassification — it writes no training comple
 
 | candidate              | why it is waiting                                                                                  |
 | ---------------------- | -------------------------------------------------------------------------------------------------- |
-| Z4 P2 head             | held by Louis; needs no code, `yolo26-p2.yaml` already exists                                      |
+| Z4 P2 head             | held by Louis, and now the top candidate — the starvation table above is the case for it           |
 | Z6 `scale=0.2`         | mechanism overlaps Z5, and Z5 failed on all three datasets — low prior now                         |
 | M2 NWD blend           | downgraded: its gate Z1 came back contradictory, and CIoU already carries both terms NWD would add |
+| M3 `o2o_topk2`         | closed permanently, not waiting — breaks the NMS-free contract, proven above                       |
+| M4 o2m `tal_topk`      | the inference-safe version of M3; near-no-op on 3cad by the pool table, so low prior               |
 | Z3 position ablation   | only if `k=6` survives the 3cad seeds — widen layer 3 only, or the stem too                        |
 | Z3 x Z7                | `k=6` at `imgsz=960` on 3cad, to test whether the two are additive                                 |
 | test-split + per-class | `eval_bench.py` over the finished runs; Phase A still owes these                                   |

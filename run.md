@@ -1309,6 +1309,52 @@ First-epoch losses already separate, which is the cheapest confirmation the knob
 `target_scores.sum()`, and lifting the soft-label ceiling enlarges the denominator. It confirms K3 is
 active; it says nothing about whether it helps.
 
+# Phase D — COCO A/B: does `k=6` generalise off the defect benchmark?
+
+Snap **`23be8da87374`** · `yolo26n` · `epochs=100` · `imgsz=640` · `batch=128` · `coco_eval=True` ·
+launched 2026-08-21. COCO is the public-data question: every `k=6` positive so far is on the three defect
+datasets, and none of those is a natural-image distribution. Data is `/data/shared-datasets/coco`
+(118,287 train / 5,000 val / 80 classes), reached through a `datasets/coco` symlink created on ultra6
+because the shared dir sits outside `datasets_dir`.
+
+Scope is **1 baseline + 3 `k=6` seeds** (Louis's call). The `k=6` donor carries the full 80-class head
+here, so `Transferred 708/708` means exactly the same bit-identical start as on the defect datasets.
+
+```bash
+EXP=/Users/louis/workspace/ultra_louis_work/expman/.venv/bin/expman-cli
+K=/home/louis/ultra_louis_work/yolo26n-k6.pt
+P=yolo26-defect-bench
+
+$EXP launch --snap --args "nohupyolo 0 train data=coco.yaml model=yolo26n.pt epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True device=7 project=$P name=coco_baseline_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=coco.yaml model=yolo26n-k6.yaml pretrained=$K epochs=100 imgsz=640 batch=128 seed=0 coco_eval=True device=4 project=$P name=coco_z3_k6_n_s0"
+$EXP launch --snap --args "nohupyolo 0 train data=coco.yaml model=yolo26n-k6.yaml pretrained=$K epochs=100 imgsz=640 batch=128 seed=1 coco_eval=True device=5 project=$P name=coco_z3_k6_n_s1"
+$EXP launch --snap --args "nohupyolo --after 3cad_z3xz7_k6_imgsz960_n_s1 train data=coco.yaml model=yolo26n-k6.yaml pretrained=$K epochs=100 imgsz=640 batch=128 seed=2 coco_eval=True device=6 project=$P name=coco_z3_k6_n_s2"
+```
+
+| GPU | run                  | note                                                |
+| --- | -------------------- | --------------------------------------------------- |
+| 7   | `coco_baseline_n_s0` | launched first so it finishes first                 |
+| 4   | `coco_z3_k6_n_s0`    |                                                     |
+| 5   | `coco_z3_k6_n_s1`    |                                                     |
+| 6   | `coco_z3_k6_n_s2`    | chained after `3cad_z3xz7_k6_imgsz960_n_s1`, ~1.7 h wait |
+
+**Readout differs from the defect datasets.** On COCO `is_coco=True`, so `coco_generic` is false and the
+COCO eval feeds the **native** `(B)` columns every epoch — the results.csv header carries
+`metrics/mAP{50,50-95,small,medium,large}(B)` and no `(B-coco)` columns. Those `(B)` values are the
+official COCOeval numbers, the standard reporting convention, and `fitness` keeps the same formula the
+stock COCO path uses, so `best.pt` semantics are unchanged and both arms are treated identically.
+
+**Speed, corrected.** ~50 epochs in ~30 min ⇒ **~40-50 s/epoch, a full run is ~1-1.5 h**, not the 20-25 h
+assumed when the seed count was decided (that estimate borrowed co-tenant defect-dataset speeds; these
+cards are solo and the n model sustains ~20 it/s at batch 128 on Blackwell). Seeds are ~15x cheaper than
+planned, so the 1v3 shape is only worth keeping if it reads as clearly null or clearly positive;
+otherwise the obvious completion is two more baseline seeds, ~3 GPU-hours total. **Louis's call
+(2026-08-21): hold at 1v3 and read the results first; baseline seeds are a follow-up decision.**
+
+Also from the launch audit: `3cad_z7_imgsz960_n_s1/_s2` and `tianchifabirc_z7_imgsz960_n_s0` were recorded
+queued/running in expman but had already completed (101-line CSVs, both weights) — the same stale-status
+class as before. Process/CSV checks above beat expman.
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status
@@ -1368,12 +1414,12 @@ column is a significance claim until `tianchifabirc_baseline_n_s1/_s2` land.
 | `3cad_z3_k6_n_s1`                | 3cad          | `k=6` seed 1      | completed | 0.3004   | 0.2387 | 0.2884 | +0.0468 (3v3 mean)  | k=6 arm                                 |
 | `3cad_z3_k6_n_s2`                | 3cad          | `k=6` seed 2      | completed | 0.3139   | 0.2607 | 0.2852 | +0.0468 (3v3 mean)  | k=6 arm; read from results.csv          |
 | `3cad_z3xz7_k6_imgsz960_n_s0`    | 3cad          | `k=6` + `960`     | completed | 0.3254   | 0.2470 | --     | --                  | best 3cad mAP50-95 so far               |
-| `3cad_z7_imgsz960_n_s1`          | 3cad          | `imgsz=960` s1    | running   | --       | --     | --     | --                  | running                                 |
-| `3cad_z7_imgsz960_n_s2`          | 3cad          | `imgsz=960` s2    | running   | --       | --     | --     | --                  | running                                 |
+| `3cad_z7_imgsz960_n_s1`          | 3cad          | `imgsz=960` s1    | completed | --       | --     | --     | --                  | completed (expman status was stale)      |
+| `3cad_z7_imgsz960_n_s2`          | 3cad          | `imgsz=960` s2    | completed | --       | --     | --     | --                  | completed (expman status was stale)      |
 | `dspcbsd_z7_imgsz960_n_s1`       | dspcbsd       | `imgsz=960` s1    | completed | 0.4807   | 0.4159 | 0.5581 | --                  | completed                               |
 | `dspcbsd_z7_imgsz960_n_s2`       | dspcbsd       | `imgsz=960` s2    | completed | 0.4725   | 0.3930 | 0.5565 | --                  | completed                               |
-| `3cad_z3xz7_k6_imgsz960_n_s1`    | 3cad          | `k=6` + `960` s1  | queued    | --       | --     | --     | --                  | queued (GPU 6)                          |
-| `tianchifabirc_z7_imgsz960_n_s0` | tianchifabirc | `imgsz=960`       | queued    | --       | --     | --     | --                  | queued (GPU 7)                          |
+| `3cad_z3xz7_k6_imgsz960_n_s1`    | 3cad          | `k=6` + `960` s1  | running   | --       | --     | --     | --                  | running (GPU 6, PID 3530124)            |
+| `tianchifabirc_z7_imgsz960_n_s0` | tianchifabirc | `imgsz=960`       | completed | --       | --     | --     | --                  | completed (expman status was stale)      |
 | `tianchifabirc_baseline_n_s1`    | tianchifabirc | baseline seed 1   | completed | 0.1891   | 0.1173 | 0.1782 | --                  | baseline                                |
 | `tianchifabirc_baseline_n_s2`    | tianchifabirc | baseline seed 2   | completed | 0.1898   | 0.1233 | 0.1826 | --                  | baseline                                |
 | `tianchifabirc_z3_k6_n_s1`       | tianchifabirc | `k=6` seed 1      | completed | 0.1957   | 0.1442 | 0.2004 | +0.0071 (3v3 mean)  | k=6 arm — no harm, t=0.88               |

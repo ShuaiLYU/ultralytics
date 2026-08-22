@@ -190,6 +190,8 @@ class TaskAlignedAssigner(nn.Module):
             mask_in_gts = self.select_candidates_by_rfd(anc_points, anc_strides, gt_bboxes, mask_gt)
         else:
             mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
+            if self.prior == "rfla_fill":
+                mask_in_gts = self.topup_candidates_by_rfd(mask_in_gts, anc_points, anc_strides, gt_bboxes, mask_gt)
         # Get anchor_align metric, (b, max_num_obj, h*w)
         align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
         # Get topk_metric mask, (b, max_num_obj, h*w)
@@ -377,11 +379,47 @@ class TaskAlignedAssigner(nn.Module):
         Returns:
             (torch.Tensor): Candidate mask of shape (b, n_boxes, h*w) with exactly `topk` anchors per valid GT.
         """
-        rf = anc_strides * (self.rf_scale / 2)  # (h*w, 1) half receptive-field side
-        anc_bboxes = torch.cat((xy_centers - rf, xy_centers + rf), -1)  # (h*w, 4) in xyxy
-        rfd = bbox_nwd(anc_bboxes, gt_bboxes.unsqueeze(2), gamma=self.nwd_gamma).squeeze(-1)  # (b, n_boxes, h*w)
+        rfd = self.receptive_field_distance(xy_centers, anc_strides, gt_bboxes)
         mask = torch.zeros_like(rfd).scatter_(-1, rfd.topk(self.topk, dim=-1).indices, 1.0)
         return mask * mask_gt  # padded GTs always rank some anchor first, so drop their picks
+
+    def receptive_field_distance(self, xy_centers, anc_strides, gt_bboxes):
+        """Score every anchor's receptive field against every GT, shape (b, n_boxes, h*w)."""
+        rf = anc_strides * (self.rf_scale / 2)  # (h*w, 1) half receptive-field side
+        anc_bboxes = torch.cat((xy_centers - rf, xy_centers + rf), -1)  # (h*w, 4) in xyxy
+        return bbox_nwd(anc_bboxes, gt_bboxes.unsqueeze(2), gamma=self.nwd_gamma).squeeze(-1)
+
+    def topup_candidates_by_rfd(self, mask_in_gts, xy_centers, anc_strides, gt_bboxes, mask_gt):
+        """Top a starved ground truth's candidate set up to `topk` using receptive-field distance.
+
+        The compensating half of RFLA's hierarchical assignment: a ground truth that already has
+        `topk` anchors whose centre falls inside it keeps exactly those, and only the ones that fall
+        short are topped up, best-RFD first. `prior='rfla'` instead replaces the candidate set
+        unconditionally, which hands every ground truth `topk - inside_pool` anchors that sit outside
+        it -- roughly 7 of 10 for a median 3cad box, against ~0 for dspcbsd -- and also strips the
+        task-aligned metric of any choice on the datasets whose pool is already healthy.
+
+        Args:
+            mask_in_gts (torch.Tensor): Centre-inside-GT mask from `select_candidates_in_gts`,
+                shape (b, n_boxes, h*w).
+            xy_centers (torch.Tensor): Anchor center coordinates, shape (h*w, 2).
+            anc_strides (torch.Tensor): Per-anchor stride, shape (h*w, 1).
+            gt_bboxes (torch.Tensor): Ground truth bounding boxes, shape (b, n_boxes, 4).
+            mask_gt (torch.Tensor): Mask for valid ground truth boxes, shape (b, n_boxes, 1).
+
+        Returns:
+            (torch.Tensor): Candidate mask of shape (b, n_boxes, h*w) with at least
+                min(topk, available) anchors per valid GT and no anchor claimed twice.
+        """
+        short = (self.topk - mask_in_gts.sum(-1, keepdim=True)).clamp_(0, self.topk)  # (b, n_boxes, 1)
+        if not short.any():
+            return mask_in_gts
+        rfd = self.receptive_field_distance(xy_centers, anc_strides, gt_bboxes)
+        rfd = rfd.masked_fill(mask_in_gts.bool(), -1.0)  # bbox_nwd is positive, so this never re-picks
+        idx = rfd.topk(self.topk, dim=-1).indices  # (b, n_boxes, topk), best first
+        rank = torch.arange(self.topk, device=idx.device).view(1, 1, -1)
+        fill = torch.zeros_like(rfd).scatter_(-1, idx, (rank < short).to(rfd.dtype))
+        return (mask_in_gts + fill) * mask_gt
 
     def select_highest_overlaps(self, mask_pos, overlaps, n_max_boxes, align_metric):
         """Select anchor boxes with highest IoU when assigned to multiple ground truths.

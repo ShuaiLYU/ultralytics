@@ -369,7 +369,9 @@ class v8DetectionLoss:
             topk=tal_topk,
             num_classes=self.nc,
             alpha=0.5,
-            beta=6.0,
+            # beta exponentiates the localization term. 6.0 is calibrated to CIoU's distribution, so
+            # tal_metric='nwd' -- which sits far closer to 1.0 for any near hit -- needs it retuned.
+            beta=h.tal_beta,
             stride=self.stride.tolist(),
             topk2=tal_topk2,
             min_side=h.tal_min_side,
@@ -1318,7 +1320,7 @@ class E2ELoss:
                 # TVPDetectLoss / TVPSegmentLoss are not v8DetectionLoss subclasses; they hold
                 # their assigner one level down, in the criterion they wrap
                 assigner = getattr(criterion, "assigner", None) or criterion.vp_criterion.assigner
-                assigner.min_side, assigner.prior, assigner.metric = None, "inside", "ciou"
+                assigner.min_side, assigner.prior, assigner.metric, assigner.beta = None, "inside", "ciou", 6.0
         self.updates = 0
         self.total = 1.0
         # init gain

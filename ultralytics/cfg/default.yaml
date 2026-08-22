@@ -114,6 +114,7 @@ tal_prior: inside # (str) assigner candidate prior: 'inside' (anchor centre insi
 tal_rf_scale: 1.0 # (float) receptive-field side in units of the anchor stride, used by tal_prior='rfla'; larger concentrates candidates on the FINEST level (measured: a 30px GT goes 6/4/0 across P3/P4/P5 at 1.0 but 10/0/0 at 4.0)
 tal_metric: ciou # (str) localization half of the task-aligned metric: 'ciou' or 'nwd' (scale-invariant, lifts the soft-label ceiling on small objects)
 tal_nwd_gamma: 1.0 # (float) normalizing-scale multiplier for the Wasserstein similarity used by tal_metric='nwd' and tal_prior='rfla'; >1 flattens, <1 sharpens
+tal_ar_rfla: 4.0 # (float) aspect-ratio gate for tal_prior='ar_rfla': sliver GTs (AR >= this, either orientation) get geometric rfla candidates, compact GTs keep inside-GT
 tal_beta: 6.0 # (float) exponent on the localization half of the task-aligned metric (score^alpha * overlap^beta); 6.0 is calibrated to CIoU, and tal_metric='nwd' sits much closer to 1.0 so needs it lower
 tal_heads: both # (str) which end2end head the four knobs above apply to: 'both', 'o2m' (trains the shared trunk) or 'o2o' (the NMS-free inference head); the other head runs a stock assigner
 pose: 12.0 # (float) pose loss gain (pose tasks)

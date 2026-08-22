@@ -47,6 +47,7 @@ class TaskAlignedAssigner(nn.Module):
         rf_scale: float = 1.0,
         metric: str = "ciou",
         nwd_gamma: float = 1.0,
+        ar_rfla: float = 4.0,
     ):
         """Initialize a TaskAlignedAssigner object with customizable hyperparameters.
 
@@ -66,6 +67,8 @@ class TaskAlignedAssigner(nn.Module):
             rf_scale (float, optional): Receptive-field side, in units of the anchor's stride, for the 'rfla' prior.
             metric (str, optional): 'ciou' or 'nwd' for the localization half of the task-aligned metric.
             nwd_gamma (float, optional): Normalizing-scale multiplier passed to `bbox_nwd`.
+            ar_rfla (float, optional): Aspect-ratio gate for `prior='ar_rfla'`; GTs at or above it (either
+                orientation) get geometric rfla candidates, the rest keep inside-GT candidates.
         """
         super().__init__()
         self.topk = topk
@@ -77,6 +80,7 @@ class TaskAlignedAssigner(nn.Module):
         self.stride_val = self.stride[1] if len(self.stride) > 1 else self.stride[0]
         self.min_side = min_side
         self.prior = prior
+        self.tal_ar_rfla = ar_rfla
         self.rf_scale = rf_scale
         self.metric = metric
         self.nwd_gamma = nwd_gamma
@@ -188,6 +192,8 @@ class TaskAlignedAssigner(nn.Module):
         """
         if self.prior == "rfla":
             mask_in_gts = self.select_candidates_by_rfd(anc_points, anc_strides, gt_bboxes, mask_gt)
+        elif self.prior == "ar_rfla":  # A2.5: geometric candidates for slivers only, inside-GT elsewhere
+            mask_in_gts = self.select_candidates_by_ar_rfla(anc_points, anc_strides, gt_bboxes, mask_gt)
         else:
             mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
             if self.prior == "rfla_fill":
@@ -196,10 +202,10 @@ class TaskAlignedAssigner(nn.Module):
         align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
         # Get topk_metric mask, (b, max_num_obj, h*w)
         if self.prior == "geom_topk":  # A2.4: keep the inside-GT pool, but rank by receptive-field distance
-            rf = anc_strides * (self.rf_scale / 2)  # (h*w, 1) half receptive-field side
-            anc_bboxes = torch.cat((anc_points - rf, anc_points + rf), -1)  # (h*w, 4) in xyxy
-            rfd = bbox_nwd(anc_bboxes, gt_bboxes.unsqueeze(2), gamma=self.nwd_gamma).squeeze(-1)  # (b, n_boxes, h*w)
+            rfd = self.receptive_field_distance(anc_points, anc_strides, gt_bboxes)
             topk_metric = rfd * mask_in_gts  # zero outside the pool so topk cannot select outside anchors
+        elif self.prior == "inside_fix":  # A2.6: align ranking untouched, but the tie bug cannot steal positives
+            topk_metric = align_metric.masked_fill(~mask_in_gts.bool(), -torch.inf)
         else:
             topk_metric = align_metric
         mask_topk = self.select_topk_candidates(topk_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool())
@@ -207,6 +213,22 @@ class TaskAlignedAssigner(nn.Module):
         mask_pos = mask_topk * mask_in_gts * mask_gt
 
         return mask_pos, align_metric, overlaps
+
+    def select_candidates_by_ar_rfla(self, xy_centers, anc_strides, gt_bboxes, mask_gt):
+        """Geometric rfla candidates for sliver ground truths, inside-GT candidates for compact ones (A2.5).
+
+        The aspect-ratio split is per ground truth: at or above `tal_ar_rfla` the candidate set is the
+        top-`topk` receptive-field distance picks (as in `prior='rfla'`), below it the ordinary
+        centre-inside-GT set (as in `prior='inside'`). The point is to give sliver-shaped defects the
+        geometric supervision that works for them on tianchifabirc while leaving 3cad's compact defects --
+        whose stability depends on the prediction-aligned ranking -- untouched.
+        """
+        wh = (gt_bboxes[..., 2:4] - gt_bboxes[..., 0:2]).clamp(min=1)  # (b, n_boxes, 2)
+        ar = wh[..., 0] / wh[..., 1]
+        sliver = (ar >= self.tal_ar_rfla) | (ar <= 1.0 / self.tal_ar_rfla)
+        inside = self.select_candidates_in_gts(xy_centers, gt_bboxes, mask_gt)
+        rfla = self.select_candidates_by_rfd(xy_centers, anc_strides, gt_bboxes, mask_gt)
+        return torch.where(sliver.unsqueeze(-1), rfla, inside).bool()
 
     def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
         """Compute alignment metric given predicted and ground truth bounding boxes.

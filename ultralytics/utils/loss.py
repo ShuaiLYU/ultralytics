@@ -379,6 +379,7 @@ class v8DetectionLoss:
             rf_scale=h.tal_rf_scale,
             metric=h.tal_metric,
             nwd_gamma=h.tal_nwd_gamma,
+            ar_rfla=h.tal_ar_rfla,
         )
         self.bbox_loss = BboxLoss(m.reg_max, inner_ratio=h.inner_ratio).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)

@@ -1435,6 +1435,56 @@ not a comparable number.
 
 **Do not read this as "A2 fails on 3cad."** A2 on 3cad is _unmeasured_ -- the arm never trained.
 
+## A1 at 3 seeds, and the A2/A3 stability fixes
+
+### A1 on 3cad confirmed: both doses, both metrics, p<0.05
+
+| arm               | mAP50-95           | Δ       | ×floor | t    | p          | AP_small           | Δ           | ×floor    | t    | p          | FLOPs |
+| ----------------- | ------------------ | ------- | ------ | ---- | ---------- | ------------------ | ----------- | --------- | ---- | ---------- | ----- |
+| `min_side=16`     | 0.2972 (sd 0.0031) | +0.0063 | +1.51  | 2.98 | **0.0482** | 0.2373 (sd 0.0110) | **+0.0448** | **+2.39** | 5.39 | **0.0062** | 1.00× |
+| `min_side=32`     | 0.3035 (sd 0.0048) | +0.0127 | +3.01  | 4.18 | **0.0306** | 0.2281 (sd 0.0059) | +0.0356     | +1.90     | 5.60 | **0.0081** | 1.00× |
+| `k=6` (incumbent) | --                 | +0.0156 | +3.71  | 3.77 | 0.0488     | --                 | +0.0468     | +2.50     | 3.52 | 0.0444     | 1.35× |
+
+Per-seed mAP50-95 `[0.2987, 0.2937, 0.2992]` for 16 and `[0.2995, 0.3089, 0.3021]` for 32; AP_small
+`[0.2270, 0.2360, 0.2488]` and `[0.2331, 0.2297, 0.2216]`.
+
+**`min_side=16` reaches 96% of `k=6`'s AP_small gain (+0.0448 vs +0.0468) at 1.00× FLOPs against 1.35×,
+with a tighter p-value on both metrics.** No clean winner between the doses: 16 takes AP_small, 32 takes
+mAP50-95, and 16 carries the larger AP_small spread (sd 0.0110 vs 0.0059). Since the two knobs act on
+different bottlenecks, the `A1 × k=6` cell in §5 is now the interesting one.
+
+### A2.2 fixes the collapse
+
+`tal_prior=rfla_fill` on 3cad, seed 0. Monotone throughout where `rfla` was dead by epoch 9:
+
+| epoch                     | 1      | 6      | 9          | 12     | 20     | 40     | 60     | 80         |
+| ------------------------- | ------ | ------ | ---------- | ------ | ------ | ------ | ------ | ---------- |
+| cls_loss                  | 15.27  | 2.66   | 2.36       | 2.15   | 1.92   | 1.58   | 1.37   | 1.12       |
+| mAP50-95                  | 0.0238 | 0.0519 | 0.0647     | 0.0844 | 0.1270 | 0.2224 | 0.2663 | **0.2943** |
+| `rfla` mAP for comparison | 0.0250 | 0.0576 | **0.0025** | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000     |
+
+At epoch 80 it is already above the baseline's best (0.2900). So the junk-positive diagnosis holds: the
+damage was `rfla` handing every starved GT `topk - inside_pool` outside-GT anchors **and** stripping
+healthy GTs of candidates. Restricting the top-up to what is actually short removes both.
+
+### A3.1 does not fix it -- `tal_beta` is a real lever but not the cause
+
+| arm                    | ep20                  | ep40                  | ep60          | ep80          | verdict                                                               |
+| ---------------------- | --------------------- | --------------------- | ------------- | ------------- | --------------------------------------------------------------------- |
+| `beta=6` (original A3) | cls 1.65 / mAP 0.0120 | collapsed             |               |               | dies ~ep25                                                            |
+| `beta=2`               | cls 1.47 / mAP 0.0583 | cls 2.97 / mAP 0      | cls **34633** | cls **19742** | dies ~ep30, explodes far worse                                        |
+| `beta=1`               | cls 1.43 / mAP 0.0173 | cls 1.18 / mAP 0.0640 | running       |               | no explosion yet, but mAP ≈ 0.06 against the baseline's ~0.17 at ep30 |
+
+**Lowering beta moves the failure rather than removing it**, and `beta=2` explodes an order of magnitude
+harder than `beta=6`. `beta=1` is the first nwd arm to reach epoch 55 without exploding, but at a third of
+the baseline's mAP, so "stable" is not yet "working".
+
+The hypothesis was that `beta=6` is calibrated to CIoU and over-sharpens `bbox_nwd`, which sits close to
+1.0 for any near hit. That is **half right at best**: beta demonstrably changes when and how the arm fails,
+so it is a live lever, but it is not the root cause. A3 stays open. Note the two fixes were independent by
+construction -- A2 runs `tal_metric=ciou` so beta cannot touch it, and A3 runs `tal_prior=inside` so the
+junk-positive story cannot -- and only one of the two diagnoses survived contact.
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status

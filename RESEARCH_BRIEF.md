@@ -207,11 +207,11 @@ one-to-many head in practice:
 
 | knob | arg              | mechanism                                                                                                |
 | ---- | ---------------- | -------------------------------------------------------------------------------------------------------- |
-| K1   | `tal_min_side`   | monotone floor on GT sides, replacing the non-monotone clamp of §1                                       |
-| K2   | `tal_prior=rfla` | RFLA (arXiv:2208.08738): rank anchors by receptive-field distance, guaranteeing `topk` candidates per GT |
-| K3   | `tal_metric=nwd` | scale-invariant Wasserstein similarity inside the assigner, lifting the soft-label ceiling               |
+| A1   | `tal_min_side`   | monotone floor on GT sides, replacing the non-monotone clamp of §1                                       |
+| A2   | `tal_prior=rfla` | RFLA (arXiv:2208.08738): rank anchors by receptive-field distance, guaranteeing `topk` candidates per GT |
+| A3   | `tal_metric=nwd` | scale-invariant Wasserstein similarity inside the assigner, lifting the soft-label ceiling               |
 
-Measured effect of K1 on the pool (starved %, `topk=10`): 3cad 52.1% → 45.1% at `min_side=16` → **0%** at 24;
+Measured effect of A1 on the pool (starved %, `topk=10`): 3cad 52.1% → 45.1% at `min_side=16` → **0%** at 24;
 tianchifabirc 40.6% → 34.2% → **0%**; dspcbsd 6.7% → 6.3% → 0%. The grid `{8, 16, 24, 32}` is complete
 because the pool counts `int(w // stride)` and so steps only at multiples of 8.
 

@@ -1203,9 +1203,9 @@ and no baseline was re-run.**
 
 | knob | arg                               | what it changes                                                                                        |
 | ---- | --------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| K1   | `tal_min_side`                    | monotone floor on GT sides, replacing the legacy clamp in `select_candidates_in_gts`                   |
-| K2   | `tal_prior=rfla`, `tal_rf_scale`  | RFLA (arXiv:2208.08738): rank anchors by receptive-field distance, `topk` candidates per GT guaranteed |
-| K3   | `tal_metric=nwd`, `tal_nwd_gamma` | scale-invariant Wasserstein similarity in place of CIoU inside the assigner                            |
+| A1   | `tal_min_side`                    | monotone floor on GT sides, replacing the legacy clamp in `select_candidates_in_gts`                   |
+| A2   | `tal_prior=rfla`, `tal_rf_scale`  | RFLA (arXiv:2208.08738): rank anchors by receptive-field distance, `topk` candidates per GT guaranteed |
+| A3   | `tal_metric=nwd`, `tal_nwd_gamma` | scale-invariant Wasserstein similarity in place of CIoU inside the assigner                            |
 
 ## The legacy clamp is not monotone, and the old pool numbers were measured against the wrong clamp
 
@@ -1242,7 +1242,7 @@ confirms the old clamp was the only error. Three consequences:
    runs `topk2=1` and therefore needs only a non-empty pool, **this whole wave is effectively a one2many
    experiment** even though the knobs are wired to both heads. Conclusions must say so.
 2. **`tianchifabirc` is materially _less_ starved than `3cad`** (40.6% vs 52.1%), not equally starved.
-3. **`dspcbsd` is a free negative control for K1**: only 2.0% of its boxes sit in the affected band, so
+3. **`dspcbsd` is a free negative control for A1**: only 2.0% of its boxes sit in the affected band, so
    `min_side=16` should not move it. If it does, the mechanism is not the one we think.
 
 Dose grid per dataset (starved %, `topk=10`), which is what selected the arms:
@@ -1291,7 +1291,7 @@ $EXP launch --snap --args "nohupyolo --after 3cad_a1_ms08_n_s0 train data=$D/3ca
 **One seed here is screening, not evidence.** No conclusion may be drawn from this wave; it only picks
 which arms get 3 seeds. Promotion bar is deliberately low -- 3cad AP_small delta above **1x** the floor
 (0.0187), not 2x -- because at n=1 a single draw carries +-0.019 and the risk is a false negative, not a
-false positive. K1 is read as a dose curve, whose shape is more robust to seed noise than any single point.
+false positive. A1 is read as a dose curve, whose shape is more robust to seed noise than any single point.
 
 **The `time` column of these nine runs is void.** Co-location costs ~8% (100 s/epoch here vs the clean
 baseline's 92.8 s/epoch), so wall-clock is still usable as a rough guide, but the clean per-run timings for
@@ -1306,7 +1306,7 @@ First-epoch losses already separate, which is the cheapest confirmation the knob
 | `3cad_a3_nwd10_n_s0` | 2.545    | **13.44** | 0.007268 |
 
 `nwd`'s lower `cls_loss` is expected rather than encouraging: `loss_cls` is a BCE sum divided by
-`target_scores.sum()`, and lifting the soft-label ceiling enlarges the denominator. It confirms K3 is
+`target_scores.sum()`, and lifting the soft-label ceiling enlarges the denominator. It confirms A3 is
 active; it says nothing about whether it helps.
 
 # Phase D — COCO A/B: does `k=6` generalise off the defect benchmark?
@@ -1331,11 +1331,11 @@ $EXP launch --snap --args "nohupyolo 0 train data=coco.yaml model=yolo26n-k6.yam
 $EXP launch --snap --args "nohupyolo --after 3cad_z3xz7_k6_imgsz960_n_s1 train data=coco.yaml model=yolo26n-k6.yaml pretrained=$K epochs=100 imgsz=640 batch=128 seed=2 coco_eval=True device=6 project=$P name=coco_z3_k6_n_s2"
 ```
 
-| GPU | run                  | note                                                |
-| --- | -------------------- | --------------------------------------------------- |
-| 7   | `coco_baseline_n_s0` | launched first so it finishes first                 |
-| 4   | `coco_z3_k6_n_s0`    |                                                     |
-| 5   | `coco_z3_k6_n_s1`    |                                                     |
+| GPU | run                  | note                                                     |
+| --- | -------------------- | -------------------------------------------------------- |
+| 7   | `coco_baseline_n_s0` | launched first so it finishes first                      |
+| 4   | `coco_z3_k6_n_s0`    |                                                          |
+| 5   | `coco_z3_k6_n_s1`    |                                                          |
 | 6   | `coco_z3_k6_n_s2`    | chained after `3cad_z3xz7_k6_imgsz960_n_s1`, ~1.7 h wait |
 
 **Readout differs from the defect datasets.** On COCO `is_coco=True`, so `coco_generic` is false and the
@@ -1414,12 +1414,12 @@ column is a significance claim until `tianchifabirc_baseline_n_s1/_s2` land.
 | `3cad_z3_k6_n_s1`                | 3cad          | `k=6` seed 1      | completed | 0.3004   | 0.2387 | 0.2884 | +0.0468 (3v3 mean)  | k=6 arm                                 |
 | `3cad_z3_k6_n_s2`                | 3cad          | `k=6` seed 2      | completed | 0.3139   | 0.2607 | 0.2852 | +0.0468 (3v3 mean)  | k=6 arm; read from results.csv          |
 | `3cad_z3xz7_k6_imgsz960_n_s0`    | 3cad          | `k=6` + `960`     | completed | 0.3254   | 0.2470 | --     | --                  | best 3cad mAP50-95 so far               |
-| `3cad_z7_imgsz960_n_s1`          | 3cad          | `imgsz=960` s1    | completed | --       | --     | --     | --                  | completed (expman status was stale)      |
-| `3cad_z7_imgsz960_n_s2`          | 3cad          | `imgsz=960` s2    | completed | --       | --     | --     | --                  | completed (expman status was stale)      |
+| `3cad_z7_imgsz960_n_s1`          | 3cad          | `imgsz=960` s1    | completed | --       | --     | --     | --                  | completed (expman status was stale)     |
+| `3cad_z7_imgsz960_n_s2`          | 3cad          | `imgsz=960` s2    | completed | --       | --     | --     | --                  | completed (expman status was stale)     |
 | `dspcbsd_z7_imgsz960_n_s1`       | dspcbsd       | `imgsz=960` s1    | completed | 0.4807   | 0.4159 | 0.5581 | --                  | completed                               |
 | `dspcbsd_z7_imgsz960_n_s2`       | dspcbsd       | `imgsz=960` s2    | completed | 0.4725   | 0.3930 | 0.5565 | --                  | completed                               |
 | `3cad_z3xz7_k6_imgsz960_n_s1`    | 3cad          | `k=6` + `960` s1  | running   | --       | --     | --     | --                  | running (GPU 6, PID 3530124)            |
-| `tianchifabirc_z7_imgsz960_n_s0` | tianchifabirc | `imgsz=960`       | completed | --       | --     | --     | --                  | completed (expman status was stale)      |
+| `tianchifabirc_z7_imgsz960_n_s0` | tianchifabirc | `imgsz=960`       | completed | --       | --     | --     | --                  | completed (expman status was stale)     |
 | `tianchifabirc_baseline_n_s1`    | tianchifabirc | baseline seed 1   | completed | 0.1891   | 0.1173 | 0.1782 | --                  | baseline                                |
 | `tianchifabirc_baseline_n_s2`    | tianchifabirc | baseline seed 2   | completed | 0.1898   | 0.1233 | 0.1826 | --                  | baseline                                |
 | `tianchifabirc_z3_k6_n_s1`       | tianchifabirc | `k=6` seed 1      | completed | 0.1957   | 0.1442 | 0.2004 | +0.0071 (3v3 mean)  | k=6 arm — no harm, t=0.88               |

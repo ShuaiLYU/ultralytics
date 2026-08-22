@@ -1309,6 +1309,16 @@ class E2ELoss:
         # topk2 only takes effect when it differs from topk, so this is the one small-target-aware
         # assignment knob in the model, and it applies to the one-to-one (inference) head alone
         self.one2one = loss_fn(model, tal_topk=7, tal_topk2=model.args.o2o_topk2)
+        # Scope the assigner knobs to one head. Reset after construction rather than through the
+        # constructors: E2ELoss is instantiated with five different loss_fn classes, only some of
+        # which subclass v8DetectionLoss, so a new parameter would have to be threaded through all
+        # of them. The head left out of scope runs a stock assigner.
+        for head, criterion in (("o2m", self.one2many), ("o2o", self.one2one)):
+            if model.args.tal_heads not in {"both", head}:
+                # TVPDetectLoss / TVPSegmentLoss are not v8DetectionLoss subclasses; they hold
+                # their assigner one level down, in the criterion they wrap
+                assigner = getattr(criterion, "assigner", None) or criterion.vp_criterion.assigner
+                assigner.min_side, assigner.prior, assigner.metric = None, "inside", "ciou"
         self.updates = 0
         self.total = 1.0
         # init gain

@@ -17,9 +17,15 @@ Read the output like this:
     - `tgt_sum` healthy while mAP still dies              -> hypothesis dead, look elsewhere
     - `fg` (positive count) going to 0                    -> the prior, not the soft label
 
+Leave `--epochs` at the arm's real value and kill the job once the CSV covers the epochs of
+interest. Shortening it does not shorten the experiment, it changes it: `lrf` decays over
+`epochs`, so a 20-epoch probe holds a far lower learning rate at epoch 6 than the 100-epoch arm
+does, and `close_mosaic` moves too. Measured the hard way -- rfla on 3cad reached AP 0.226 at
+`epochs=20` and never diverged at all, while the 100-epoch arm peaked at 0.0576 and collapsed.
+
 Usage:
-    python scripts/anomaly_bench/assigner_probe.py --data <data.yaml> --epochs 15 --device 0 \
-        --name probe_rfla --tal_prior rfla
+    python scripts/anomaly_bench/assigner_probe.py --data <data.yaml> --epochs 100 --device 0 \
+        --name probe_rfla --tal_prior rfla     # then kill once past the divergence
 """
 
 import argparse
@@ -38,11 +44,24 @@ from ultralytics.utils.tal import TaskAlignedAssigner  # noqa: E402
 KNOBS = ("tal_min_side", "tal_prior", "tal_rf_scale", "tal_metric", "tal_nwd_gamma")
 
 
+FIELDS = ("call", "head", "n_gt", "fg", "tgt_sum", "clamped", "tgt_max", "fg_per_gt")
+
+
 def install_probe(out: Path, every: int) -> list:
-    """Wrap `TaskAlignedAssigner._forward` so every `every`-th call appends one row per head."""
+    """Wrap `TaskAlignedAssigner._forward` so every `every`-th call appends one row per head.
+
+    Rows are flushed as they are produced rather than at the end: the runs worth probing are the
+    ones that diverge, and a divergence read after the fact is no use if the process had to
+    survive to write the file. It also means the CSV can be tailed while the job runs, so a probe
+    can be killed as soon as it is past the interesting epochs.
+    """
     rows: list[dict] = []
     original = TaskAlignedAssigner._forward
     state = {"calls": 0}
+    handle = open(out, "w", newline="")
+    writer = csv.DictWriter(handle, fieldnames=list(FIELDS))
+    writer.writeheader()
+    handle.flush()
 
     def probed(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt, anc_strides=None):
         result = original(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt, anc_strides)
@@ -54,19 +73,20 @@ def install_probe(out: Path, every: int) -> list:
         if state["calls"] % every == 0:
             n_gt = int(mask_gt.sum())
             tgt_sum = float(target_scores.sum())
-            rows.append(
-                dict(
-                    call=state["calls"],
-                    head=head,
-                    n_gt=n_gt,
-                    fg=int(fg_mask.sum()),
-                    # the quantity the max(..., 1) clamp acts on -- under 1.0 the cls loss stops being a mean
-                    tgt_sum=round(tgt_sum, 6),
-                    clamped=int(tgt_sum < 1.0),
-                    tgt_max=round(float(target_scores.max()), 6),
-                    fg_per_gt=round(int(fg_mask.sum()) / max(n_gt, 1), 3),
-                )
+            row = dict(
+                call=state["calls"],
+                head=head,
+                n_gt=n_gt,
+                fg=int(fg_mask.sum()),
+                # the quantity the max(..., 1) clamp acts on -- under 1.0 the cls loss stops being a mean
+                tgt_sum=round(tgt_sum, 6),
+                clamped=int(tgt_sum < 1.0),
+                tgt_max=round(float(target_scores.max()), 6),
+                fg_per_gt=round(int(fg_mask.sum()) / max(n_gt, 1), 3),
             )
+            rows.append(row)
+            writer.writerow(row)
+            handle.flush()
         return result
 
     TaskAlignedAssigner._forward = probed
@@ -78,7 +98,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--model", default="yolo26n.pt")
-    ap.add_argument("--epochs", type=int, default=15)
+    # Keep this at the arm's real epoch count. Shortening it rescales the LR decay and moves
+    # close_mosaic, so a 20-epoch probe of a 100-epoch arm is a different optimization problem --
+    # measured: rfla on 3cad reached AP 0.226 at epochs=20 while the 100-epoch arm peaked at
+    # 0.0576 and collapsed. Probe the real schedule and kill the job once the CSV is past the
+    # epochs of interest; rows are flushed as they are written.
+    ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--device", default="0")
@@ -113,16 +138,12 @@ def main() -> None:
             exist_ok=True,
             **knobs,
         )
-    finally:  # a divergence that ends in an exception is exactly the case whose log we need
+    finally:  # rows are already on disk; this only summarizes, so a kill -9 still leaves the CSV
         if rows:
-            with open(csv_path, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=list(rows[0]))
-                w.writeheader()
-                w.writerows(rows)
             o2m = [r for r in rows if r["head"] == "o2m"]
             clamped = sum(r["clamped"] for r in o2m)
             LOGGER.info(
-                f"assigner_probe: wrote {len(rows)} rows to {csv_path}\n"
+                f"assigner_probe: {len(rows)} rows in {csv_path}\n"
                 f"  o2m steps logged: {len(o2m)}   steps with target_scores.sum() < 1: {clamped} "
                 f"({100 * clamped / max(len(o2m), 1):.1f}%)\n"
                 f"  tgt_sum  min={min(r['tgt_sum'] for r in o2m):.4f}  max={max(r['tgt_sum'] for r in o2m):.4f}\n"

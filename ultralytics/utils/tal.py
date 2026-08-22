@@ -363,6 +363,11 @@ class TaskAlignedAssigner(nn.Module):
         test this prior cannot starve an object smaller than one cell; the size term in the Wasserstein distance
         is what still sends large objects to the coarse levels.
 
+        Note `rf_scale` scales every level's box together, so raising it makes all levels look too large for a
+        given object and the finest one -- least too large -- wins by a widening margin. Larger therefore
+        concentrates candidates on P3, not on the coarse levels: measured at `imgsz=640`, a 30px GT splits
+        6/4/0 across P3/P4/P5 at `rf_scale=1` but 10/0/0 at 4.
+
         Args:
             xy_centers (torch.Tensor): Anchor center coordinates, shape (h*w, 2).
             anc_strides (torch.Tensor): Per-anchor stride, shape (h*w, 1).

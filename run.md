@@ -1485,6 +1485,56 @@ so it is a live lever, but it is not the root cause. A3 stays open. Note the two
 construction -- A2 runs `tal_metric=ciou` so beta cannot touch it, and A3 runs `tal_prior=inside` so the
 junk-positive story cannot -- and only one of the two diagnoses survived contact.
 
+## Wave A results — final tables
+
+Best epoch by `metrics/mAP50-95(B)`, AP_small read from the same row; Welch against the 3-seed baseline.
+
+### A1 (tal_min_side) — 3cad-specific, now final on all three datasets
+
+| dataset                 | mAP50-95 Δ (×floor) | t / p             | AP_small Δ (×floor) | t / p             | verdict             |
+| ----------------------- | ------------------- | ----------------- | ------------------- | ----------------- | ------------------- |
+| 3cad `min_side=16`      | +0.0063 (+1.51)     | 2.98 / **0.0482** | +0.0448 (+2.39)     | 5.39 / **0.0062** | **confirmed**       |
+| 3cad `min_side=32`      | +0.0127 (+3.01)     | 4.18 / **0.0306** | +0.0356 (+1.90)     | 5.60 / **0.0081** | **confirmed**       |
+| tianchifabirc `16`      | +0.0035 (+0.73)     | 2.00 / 0.1208     | +0.0035 (+0.42)     | 1.22 / 0.3022     | **no effect**       |
+| dspcbsd `16` (neg ctrl) | +0.0036 (+0.53)     | 1.13 / 0.3244     | +0.0070 (+4.35)     | 1.70 / 0.2282     | **passes as no-op** |
+
+3cad per-seed AP_small for `16`: `.2270/.2360/.2488` against baseline `.1882/.2032/.1861` — all three
+seeds above the baseline's max. The two doses specialise rather than plateau: `16` favours AP_small, `32`
+favours mAP50-95. The dspcbsd +4.35x AP_small reading is not an effect — its AP_small floor is 0.0016,
+so the ×floor column overstates, and p=0.23 says noise. A1 is therefore **3cad-only**: the mechanism is
+specific to that dataset's geometry, not a universal small-object lever.
+
+### A2 (rfla) vs A2.2 (rfla_fill) — the compensating prior kills the effect
+
+`3cad_a22_rflafill_n_s0` read +1.49x on mAP50-95 at n=1; the second seed closed that: per-seed
+`.2971/.2858` mAP, `.2012/.1864` AP_S → mean Δ +0.0006 (+0.15x) mAP, +0.0013 (+0.07x) AP_S, t≈0.1.
+**A2.2 is a no-op on 3cad.** Training is stable, so the compensation design works as code; it simply
+buys nothing there.
+
+The decisive remaining question is whether A2.2 keeps A2's tianchifabirc win (+5.19x, p=0.0069). If it
+drops there too, the win came specifically from the unconditional replacement — meaning A2's benefit is
+the _removal_ of the inside-GT choice from well-fed GTs, not the feeding of starved ones, and the whole
+line is dataset-specific like A1. `tianchifabirc_a22_rflafill_n_s0` is queued.
+
+### A3.1 (nwd + beta) — stable at beta=1, but below baseline
+
+`nwd beta=6` (original A3) and `beta=2` collapse; `beta=1` completes 100 epochs. `beta` therefore does
+govern stability, and smaller is more stable. But `nwd beta=1` scores mAP50-95 0.2612, **−7.07x floor**
+against baseline. The arm confounds two changes (metric swapped AND beta lowered); attributing the loss
+needs a `ciou beta=1` control, which has not been run. Parked.
+
+### A4 (k6 × ms16, 3cad) — first seed only
+
+Seed 0: mAP50-95 0.3004 (+2.26x), AP_small 0.2085 (+0.86x). Below either single arm's AP_small
+(k6 +2.50x, ms16 +2.39x), but k6's AP_small sd across seeds is 0.021, so one draw carries ±0.011 and no
+additivity claim is possible yet. Two seeds queued.
+
+### Phase D (COCO k=6) — logged here for completeness
+
+COCO mAP50-95, best epoch: baseline 0.38646; `k6` seeds 0.38870 / 0.38870 / 0.38870. Δ +0.0022. No COCO
+noise floor was ever established, so no significance claim; direction is positive and the size is small
+against the 3cad-scale effects above.
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status

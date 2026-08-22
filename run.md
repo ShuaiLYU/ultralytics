@@ -1535,6 +1535,65 @@ COCO mAP50-95, best epoch: baseline 0.38646; `k6` seeds 0.38870 / 0.38870 / 0.38
 noise floor was ever established, so no significance claim; direction is positive and the size is small
 against the 3cad-scale effects above.
 
+## Wave A — final: A2.4, the tie bug, and the stability law
+
+### A2.4 (`tal_prior=geom_topk`): A2's gain splits into tie-bug repair + unconditional replacement
+
+`geom_topk` keeps the inside-GT pool and only swaps the topk RANKING from the prediction-aligned
+`align_metric` to receptive-field distance, zeroed outside the pool. It was built after the earlier
+"sliver re-routing" story was refuted (that came from a broken analysis script; rfla picks 10/0/0 across
+P3/P4/P5 for real slivers, same as inside) -- and after a real bug was found in the default path.
+
+**The tie bug (default code).** `select_topk_candidates` always takes the top-10 of `align_metric`, even
+when a GT's inside pool is smaller than 10. The missing slots fill with all-zero ties from OUTSIDE the
+pool, and `mask_pos = mask_topk * mask_in_gts` silently kills those positions -- each zero that out-ranks
+an in-box anchor steals that anchor's positive. Synthetic: a 16x16 GT (pool 4) ends with 3 positives under
+default, 4/4 under geom_topk. Real scale: tianchifabirc 670 GTs with pool<10 (median 5, 3511 in-box
+anchors worst-case at risk), 3cad 777, dspcbsd only 213 (6.7% -- which matches A2's no-op there).
+
+| dataset       | geom_topk (n=1)                            | vs A2 rfla       |
+| ------------- | ------------------------------------------ | ---------------- |
+| tianchifabirc | mAP 0.2038 (+2.69x floor), stable          | A2 +5.19x (n=3)  |
+| dspcbsd       | +0.16x, no-op (negative control passes)    | A2 +0.57x        |
+| 3cad          | **collapsed at ep11** (box 5.77, cls 1257) | A2 collapsed ep9 |
+
+So the tie-bug repair is worth roughly half of A2's tianchifabirc win and the rest requires the
+unconditional replacement. The 3cad collapse falsifies the commit-time prediction that keeping the inside
+pool would prevent it.
+
+### The stability law (3cad): remove the model's prediction from the topk ranking and it diverges
+
+Every assigner change on 3cad now sorts cleanly by WHO decides the topk:
+
+| arm                               | topk ranking                          | result                    |
+| --------------------------------- | ------------------------------------- | ------------------------- |
+| baseline, ms8/16/24/32, rfla_fill | prediction alignment (`align_metric`) | all stable                |
+| rfla                              | none (fixed 10)                       | collapse ep9              |
+| geom_topk                         | geometric distance                    | collapse ep11             |
+| nwd beta<=2                       | swapped metric                        | collapse ep22 or earlier  |
+| nwd beta=1, gamma=2               | softened swapped metric               | stable but below baseline |
+
+Candidate-POOL changes (inflation, top-up) are stable because they leave the ranking alone. Anything that
+removes or replaces the model's own alignment feedback diverges: 3cad needs that feedback to keep its
+confidence branch from drifting into emitting everything (the collapsed outputs were 300 boxes/image at
+max_det, one size). tianchifabirc is the opposite -- fixed geometry beats the model's own picks, plausibly
+because prediction alignment on slivers is unreliable. This is the mechanism behind A2's dataset
+specificity, replacing the refuted re-routing story.
+
+### A4 close-out: k6 combinations do not stack on either dataset
+
+tianchifabirc k6 x rfla, 3 seeds: mAP 0.2223 (+6.55x floor, t=15.43, p=0.0001) -- but vs rfla alone
+Delta+0.0066, t=1.90, p=0.158. 3cad k6 x ms32 (3 seeds): AP_small +2.56x p=0.0405, essentially the max of
+the two single arms. Bottlenecks (a) and (b) hit the same ceiling on both datasets; there is no additive
+combination to harvest from stacking.
+
+### Corrigendum
+
+The "A2 routes slivers to coarse levels" mechanism recorded earlier is wrong -- it came from a script bug
+(anchor-pool level indexing). Re-measured rfla picks are 10/0/0 (P3/P4/P5) for real slivers, identical to
+inside. The correct mechanism is the topk-ranking control described above. The run.md sections that repeat
+the routing story should be read with this in mind; the experimental numbers were never affected.
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status

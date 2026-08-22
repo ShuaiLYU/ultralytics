@@ -1355,6 +1355,86 @@ Also from the launch audit: `3cad_z7_imgsz960_n_s1/_s2` and `tianchifabirc_z7_im
 queued/running in expman but had already completed (101-line CSVs, both weights) — the same stale-status
 class as before. Process/CSV checks above beat expman.
 
+## Wave A results
+
+Best epoch by `metrics/mAP50-95(B)`, AP_small read from the same row -- the convention that reproduces
+every published baseline figure here (`3cad_baseline_n_s0` -> 0.2900 / 0.1882 / 0.2699).
+
+### A2 on tianchifabirc: the strongest arm measured on this benchmark so far
+
+3 seeds, Welch against the 3-seed baseline. **Both metrics clear p<0.05.**
+
+| metric   | arm                | baseline | Δ           | ×floor    | t     | p          |
+| -------- | ------------------ | -------- | ----------- | --------- | ----- | ---------- |
+| mAP50-95 | 0.2158 (sd 0.0054) | 0.1909   | **+0.0249** | **+5.19** | +7.28 | **0.0069** |
+| AP_small | 0.1335 (sd 0.0041) | 0.1220   | +0.0114     | +1.36     | +3.37 | **0.0282** |
+
+Per-seed mAP50-95 `[0.2211, 0.2159, 0.2103]`, AP_small `[0.1361, 0.1287, 0.1356]`.
+
+For scale, the incumbent `k=6` peaks at 3cad mAP50-95 +0.0156 with t=3.77, p=0.0488, and costs 1.35x
+FLOPs. **A2 is a larger and more significant effect at 1.00x inference cost**, and it lands on the dataset
+section 2 calls the highest-variance and hardest to move. It does cost ~12% training wall clock
+(123 vs 110 s/epoch): rfla runs a topk over all 8400 anchors per GT where `inside` runs a boolean test.
+
+### A1 on 3cad: AP_small confirmed, dose plateaus, mAP50-95 not resolved
+
+2 seeds each (third pair running). p at n=2 has df≈2 and is indicative only; the effect sizes are not.
+
+| arm           | mAP50-95           | Δ       | ×floor | p      | AP_small           | Δ           | ×floor    | p          |
+| ------------- | ------------------ | ------- | ------ | ------ | ------------------ | ----------- | --------- | ---------- |
+| `min_side=16` | 0.2962 (sd 0.0035) | +0.0053 | +1.27  | 0.2394 | 0.2315 (sd 0.0063) | **+0.0390** | **+2.09** | **0.0123** |
+| `min_side=32` | 0.3042 (sd 0.0066) | +0.0134 | +3.18  | 0.1961 | 0.2314 (sd 0.0024) | **+0.0389** | **+2.08** | **0.0127** |
+
+**16 and 32 give the same AP_small gain to four decimals (+0.0390 vs +0.0389).** The dose response
+plateaus, so the single-seed zigzag (16: +1.85, 24: +0.74, 32: +2.17) was seed noise, as suspected. Prefer
+`min_side=16` on the principle that it is the smallest dose that buys the effect -- and note it is also the
+dose that merely removes the clamp's discontinuity rather than over-inflating every GT.
+
+`min_side=32` shows the larger mAP50-95 (+3.18x floor vs +1.27x) but neither is significant, and 3cad's
+mAP50-95 floor is its tight one (0.0042), so this is the cell most likely to move with the third seed.
+
+### A2/A3 on 3cad: reproducible collapse, three hypotheses refuted, mechanism unknown
+
+`tal_prior=rfla` (both rf scales) and `tal_metric=nwd` (gamma 0.5 and 1.0) peak at epoch 6-22 and collapse
+to mAP 0. `nwd gamma=2.0` is the only survivor of the five. Same configs are fine on the other two
+datasets. Established, in order:
+
+1. **Reproducible.** `scripts/anomaly_bench/assigner_probe.py` on `3cad` + `rfla` matches
+   `3cad_a2_rfla1_n_s0` epoch for epoch: 0.0250 at ep1, 0.0576 peak at ep6, 0.0025 by ep9. args differ in
+   `exist_ok` alone.
+2. **Not a soft-label collapse.** The hypothesis was that `target_scores.sum()` falls under the
+   `max(..., 1)` clamp in `v8DetectionLoss.loss`, turning `loss[1]` from a mean into a raw sum. Refuted:
+   across 482 logged steps spanning the collapse, o2m held 9.4-9.6 positives per GT, o2o held **exactly
+   1.000** (the `topk2=1` contract), `target_scores.sum()` ran 64-494, `tgt_max` stayed 0.90-0.99, and the
+   clamp fired **0/482** times. The assignment is healthy the whole way through.
+3. **Not the o2o head.** `tal_heads=o2m` (A2.1, `3cad_a21_rfla1o2m_n_s0`) leaves o2o on a stock assigner
+   and collapses at **epoch 9 identically**. The damage reaches the inference head through the shared
+   trunk that o2m trains. After ep9 the whole model diverges: box_loss saturates 2.19 -> 4.09, cls_loss
+   climbs past 25.
+4. **The signature is output mode collapse.** At an identical `conf=0.001`, the collapsed weights emit
+   **300 boxes/image** -- saturating `max_det` -- against the baseline's 6.0, and all one size:
+
+   |                | boxes/img | width median | width sd | height median | height sd | both sides in [6,11] px |
+   | -------------- | --------- | ------------ | -------- | ------------- | --------- | ----------------------- |
+   | rfla collapsed | 300       | 15.5         | **4.67** | 23.6          | **5.01**  | 0.0%                    |
+   | baseline       | 6.0       | 19.0         | 103.44   | 24.0          | 52.56     | 7.9%                    |
+
+   It predicts roughly the dataset-average box everywhere. With no NMS on o2o that annihilates precision.
+   **Not** the "predict your own receptive field" shortcut -- 0.0% of boxes are cell-sized.
+
+5. **Not a representational limit.** At `reg_max=1` the box branch is a bare `Conv2d(c2, 4, 1)` with
+   `dfl = nn.Identity()`, so ltrb may go negative and an anchor outside its GT can represent that GT.
+6. **It is schedule-dependent.** The identical config at `epochs=20` never collapses and reaches AP 0.226.
+   `lrf` decays over `epochs`, so a 20-epoch run holds a far lower LR at epoch 6 than the 100-epoch arm --
+   which points at sustained post-warmup learning rate rather than at anything in the assignment.
+
+**Parked here.** Three refuted hypotheses is enough; A2 on 3cad is unusable at this benchmark's schedule
+and the cause is open. The one cheap lead left is (6): `cos_lr=True` or a lower `lr0` on 3cad + rfla, which
+would deviate from the fixed protocol and so could only support the claim "A2 needs a gentler schedule",
+not a comparable number.
+
+**Do not read this as "A2 fails on 3cad."** A2 on 3cad is _unmeasured_ -- the arm never trained.
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status

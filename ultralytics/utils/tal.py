@@ -195,7 +195,14 @@ class TaskAlignedAssigner(nn.Module):
         # Get anchor_align metric, (b, max_num_obj, h*w)
         align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
         # Get topk_metric mask, (b, max_num_obj, h*w)
-        mask_topk = self.select_topk_candidates(align_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool())
+        if self.prior == "geom_topk":  # A2.4: keep the inside-GT pool, but rank by receptive-field distance
+            rf = anc_strides * (self.rf_scale / 2)  # (h*w, 1) half receptive-field side
+            anc_bboxes = torch.cat((anc_points - rf, anc_points + rf), -1)  # (h*w, 4) in xyxy
+            rfd = bbox_nwd(anc_bboxes, gt_bboxes.unsqueeze(2), gamma=self.nwd_gamma).squeeze(-1)  # (b, n_boxes, h*w)
+            topk_metric = rfd * mask_in_gts  # zero outside the pool so topk cannot select outside anchors
+        else:
+            topk_metric = align_metric
+        mask_topk = self.select_topk_candidates(topk_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool())
         # Merge all mask to a final mask, (b, max_num_obj, h*w)
         mask_pos = mask_topk * mask_in_gts * mask_gt
 

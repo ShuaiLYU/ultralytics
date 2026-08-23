@@ -210,6 +210,8 @@ class TaskAlignedAssigner(nn.Module):
             mask_in_gts = self.select_candidates_by_ar_rfla(anc_points, anc_strides, gt_bboxes, mask_gt)
         elif self.prior == "level_assign":  # A8: hard level by the long side, soft within (level + finer neighbour)
             mask_in_gts = self.select_candidates_by_level(anc_points, anc_strides, gt_bboxes, mask_gt)
+        elif self.prior == "center_pool":  # A9: slivers pool the topk anchors nearest the GT centre, ranking untouched
+            mask_in_gts = self.select_candidates_by_center(anc_points, gt_bboxes, mask_gt)
         else:
             mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
             if self.prior == "rfla_fill":
@@ -415,6 +417,27 @@ class TaskAlignedAssigner(nn.Module):
 
         lt, rb = gt_bboxes.unsqueeze(2).chunk(2, 3)  # (b, n_boxes, 1, 2) left-top, right-bottom
         return ((xy_centers - lt > eps) & (rb - xy_centers > eps)).all(3)
+
+    def select_candidates_by_center(self, xy_centers, gt_bboxes, mask_gt):
+        """Pool the `topk` anchors nearest each sliver GT's centre; compact GTs keep inside-GT (A9).
+
+        `tal_prior='center_pool'`. For aspect ratio >= `sliver_ar` (either orientation), the candidate
+        pool is the top-`topk` anchors by Euclidean distance to the GT centre, across all levels. This is
+        exactly rfla's behaviour for slivers -- where the size term matches along the whole sliver and
+        the centre-distance term dominates, so rfla picks cluster at the centre -- with one deliberate
+        omission: nothing here constrains the anchor SIZE, and the within-pool topk ranking stays the
+        model's align_metric. Separates "centre anchoring" from "geometric pinning": if centre pooling
+        alone carries A2's tianchi gain, then the pinning is unnecessary and the 3cad stability law --
+        which fires on ranking changes, not pool changes -- predicts this arm trains on 3cad.
+        """
+        wh = gt_bboxes[..., 2:4] - gt_bboxes[..., 0:2]  # (b, n, 2)
+        ar = wh[..., 0] / wh[..., 1].clamp(min=1)
+        sliver = (ar >= self.sliver_ar) | (ar <= 1.0 / self.sliver_ar)  # (b, n)
+        centre = (gt_bboxes[..., :2] + gt_bboxes[..., 2:4]) / 2  # (b, n, 2)
+        d2 = ((xy_centers.unsqueeze(0).unsqueeze(0) - centre.unsqueeze(2)) ** 2).sum(-1)  # (b, n, h*w)
+        pool = torch.zeros_like(d2).scatter_(-1, d2.topk(self.topk, dim=-1).indices, 1.0)  # (b, n, h*w)
+        inside = self.select_candidates_in_gts(xy_centers, gt_bboxes, mask_gt)
+        return torch.where(sliver.unsqueeze(-1), pool, inside).bool() & mask_gt.bool()
 
     def select_candidates_by_level(self, xy_centers, anc_strides, gt_bboxes, mask_gt):
         """Assign each GT a level by its long side, then pool inside-box anchors of that level + finer neighbour.

@@ -383,6 +383,8 @@ class v8DetectionLoss:
             sliver_ar=h.tal_sliver_ar,
             sliver_side=h.tal_sliver_side,
             sliver_floor=h.tal_sliver_floor,
+            score_inflate=h.tal_score_inflate,
+            pin_ar=h.tal_pin_ar,
         )
         self.bbox_loss = BboxLoss(m.reg_max, inner_ratio=h.inner_ratio).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)

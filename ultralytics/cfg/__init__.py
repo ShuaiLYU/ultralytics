@@ -317,6 +317,7 @@ CFG_BOOL_KEYS = frozenset(
         "end2end",
         "cls_remap",
         "tal_score_inflate",
+        "tal_pin_ar",
     }
 )
 CFG_STR_KEYS = frozenset(

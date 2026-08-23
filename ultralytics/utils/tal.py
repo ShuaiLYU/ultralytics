@@ -51,6 +51,7 @@ class TaskAlignedAssigner(nn.Module):
         sliver_ar: float = 4.0,
         sliver_floor: str = "off",
         score_inflate: bool = False,
+        pin_ar: float = 0.0,
         sliver_side: float = 0.0,
     ):
         """Initialize a TaskAlignedAssigner object with customizable hyperparameters.
@@ -83,6 +84,10 @@ class TaskAlignedAssigner(nn.Module):
                 side, and a square's short side equals it.
             score_inflate (bool, optional): 1A -- score slivers against their 2x-level-stride surrogate box
                 in `iou_calculation` (ranking and soft label only; the regression target stays the real box).
+            pin_ar (float, optional): 0 disables. With `prior='level_assign'`, GTs at or above this aspect
+                ratio (either orientation) get pinned geometric candidates instead of the level pool; the
+                rest keep the model-driven ranking. Separates the two datasets: AR>=16 is 22.9% of tianchi
+                and 2.5% of 3cad.
         """
         super().__init__()
         self.topk = topk
@@ -98,6 +103,7 @@ class TaskAlignedAssigner(nn.Module):
         self.sliver_ar = sliver_ar
         self.sliver_floor = sliver_floor
         self.score_inflate = score_inflate
+        self.pin_ar = pin_ar
         self.sliver_side = sliver_side
         self.rf_scale = rf_scale
         self.metric = metric
@@ -214,6 +220,8 @@ class TaskAlignedAssigner(nn.Module):
             mask_in_gts = self.select_candidates_by_ar_rfla(anc_points, anc_strides, gt_bboxes, mask_gt)
         elif self.prior == "level_assign":  # A8: hard level by the long side, soft within (level + finer neighbour)
             mask_in_gts = self.select_candidates_by_level(anc_points, anc_strides, gt_bboxes, mask_gt)
+            if self.pin_ar:  # A10: extreme slivers (AR >= pin_ar) get pinned geometric candidates instead
+                mask_in_gts = self.pin_extreme_slivers(mask_in_gts, anc_points, anc_strides, gt_bboxes, mask_gt)
         elif self.prior == "center_pool":  # A9: slivers pool the topk anchors nearest the GT centre, ranking untouched
             mask_in_gts = self.select_candidates_by_center(anc_points, gt_bboxes, mask_gt)
         else:
@@ -501,6 +509,23 @@ class TaskAlignedAssigner(nn.Module):
         anc_lvl = (anc_strides == strides_t).float()  # (h*w, nl)
         allowed_mask = (allowed_levels @ anc_lvl.t()) > 0  # (b, n, h*w)
         return (inside & allowed_mask).bool()
+
+    def pin_extreme_slivers(self, mask_in_gts, xy_centers, anc_strides, gt_bboxes, mask_gt):
+        """Replace the candidate pool with pinned geometric picks for extreme slivers only (A10).
+
+        `tal_prior='level_assign'` + `tal_pin_ar`. GTs at or above the pin aspect-ratio gate (either
+        orientation) get `select_candidates_by_rfd`'s fixed topk geometric candidates -- the pinning
+        that carries the tianchi gain -- while every milder GT keeps the level_assign pool with its
+        model-driven ranking. The gate is the clean separator between the two datasets: AR>=16 covers
+        22.9% of tianchi GTs but only 2.5% of 3cad's, so the stability-law exposure on 3cad is a 45-GT
+        dose instead of arf4's 352. On tianchi the extreme slivers are exactly where the CIoU
+        degenerates, so the pin lands where the disease is.
+        """
+        wh = gt_bboxes[..., 2:4] - gt_bboxes[..., 0:2]
+        ar = wh[..., 0] / wh[..., 1].clamp(min=1)
+        extreme = (ar >= self.pin_ar) | (ar <= 1.0 / self.pin_ar)  # (b, n)
+        pinned = self.select_candidates_by_rfd(xy_centers, anc_strides, gt_bboxes, mask_gt)
+        return torch.where(extreme.unsqueeze(-1), pinned, mask_in_gts).bool()
 
     def select_candidates_by_rfd(self, xy_centers, anc_strides, gt_bboxes, mask_gt):
         """Select each ground truth's candidate anchors by receptive-field distance (RFLA, arXiv:2208.08738).

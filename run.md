@@ -1926,3 +1926,62 @@ where `pool < topk`, which makes the healthy-GT flood impossible by construction
 existing `topup_candidates_by_rfd` path with the top-up ranked by `bbox_nwd(pred_box, gt)` instead of
 receptive-field distance. Prior against it: geometric top-up (`rfla_fill`) was already measured as a
 no-op (+0.60x, p=0.578), so the whole "fill starved GTs" family may simply not be the lever.
+
+### Aspect-ratio split of the same probe (2026-08-23)
+
+Small square defects already have a cure (`tal_min_side`, confirmed on 3cad), so the open population
+is the slivers. Re-analysing the same CSVs by aspect ratio, no new GPU time:
+
+```bash
+for d in 3cad tianchifabirc dspcbsd; do
+  python scripts/anomaly_bench/anchor_pool.py --csv runs/yolo26-defect-bench/warm_$d/warm_pool.csv
+done
+```
+
+| dataset   | AR 1-2 | AR 2-4 | AR 4-8 | AR 8-16 | AR >=16 | **AR >= 4** |
+| --------- | ------ | ------ | ------ | ------- | ------- | ----------- |
+| `3cad`    | 44.1%  | 29.8%  | 15.3%  | 7.8%    | 3.0%    | **26.1%**   |
+| `tianchi` | 23.0%  | 22.5%  | 21.3%  | 13.4%   | 19.9%   | **54.6%**   |
+| `dspcbsd` | 73.5%  | 18.9%  | 6.0%   | 1.4%    | 0.2%    | **7.6%**    |
+
+Per-group detail (median short/long px, median pool, mean per-GT level share, % starved):
+
+| dataset   | AR      | short | long  | pool | P3/P4/P5 per GT | P3-only | starved |
+| --------- | ------- | ----- | ----- | ---- | --------------- | ------- | ------- |
+| `3cad`    | 1-2     | 15.8  | 21.5  | 8.0  | 77/19/5         | 10.2%   | 54.1%   |
+| `3cad`    | 4-8     | 9.7   | 50.8  | 14.0 | 77/18/5         | 6.5%    | 31.9%   |
+| `3cad`    | 8-16    | 9.6   | 103.9 | 25.0 | 76/19/5         | 3.2%    | 4.3%    |
+| `3cad`    | >=16    | 9.8   | 247.4 | 57.0 | 75/21/4         | 0.0%    | 0.0%    |
+| `tianchi` | 1-2     | 16.4  | 23.6  | 8.0  | 76/20/5         | 10.3%   | 52.3%   |
+| `tianchi` | 4-8     | 7.6   | 47.2  | 13.0 | 76/19/5         | 2.7%    | 34.2%   |
+| `tianchi` | 8-16    | 9.2   | 107.2 | 26.0 | 76/20/5         | 2.4%    | 7.8%    |
+| `tianchi` | >=16    | 7.5   | 291.2 | 76.5 | 75/20/5         | 3.0%    | 0.0%    |
+| `dspcbsd` | 1-2     | 37.5  | 48.0  | 38.0 | 76/19/5         | 0.9%    | 14.9%   |
+| `dspcbsd` | >=16    | 9.2   | 192.1 | 36.0 | 69/28/2         | 0.0%    | 0.0%    |
+
+**Sliver share predicts the sliver-knob effect size.** AR>=4 is 54.6% / 26.1% / 7.6% for
+tianchi / 3cad / dspcbsd, matching where `rfla` and A7 pay: tianchi +5.19x/+5.26x, 3cad collapses
+(its 26% cannot pay for the ranking damage), dspcbsd nothing. Together with the starvation table
+above, the two populations now have separate, measured causes.
+
+**Law — the pool's level composition is constant at 76/19/5.** A GT's per-level pool is its area over
+that level's stride squared, so the shares are `(1/64):(1/256):(1/1024)` = 76:19:5 for *every* GT:
+tiny, huge, square or sliver (measured range across all 15 groups: 69-77 / 18-28 / 2-5%). Two
+consequences:
+
+- **No box-widening knob can change which level answers for a sliver.** Widening scales all three
+  levels together and leaves the share fixed — this is the mechanism behind the S1/S2 P3 flood, and
+  it makes the whole "raise the short side" family dead for slivers, not just badly dosed.
+- Only a prior that *replaces* the pool with a level-aware rule (`rfla`, `ar_rfla`) can move a sliver
+  to a coarse level. A7 (`ms16` + `ar_rfla4`) is exactly that split — geometric cure for the square
+  population, pool replacement for the sliver population — which is now explained rather than found.
+
+**Correction to an earlier assumption.** A short side under one cell does not zero that level:
+centres sit at `(i + 0.5) * stride`, so a 11.5 px side still catches a P4 row whenever it straddles
+one. `P3-only` never exceeds 10.3% in any group. The recorded `11.5x637.5 -> 160/40/0` measurement is
+consistent with this (P4 = 40, not 0); the P5 zero there is the `floor` of a 637.5 px long side, not
+the short side vanishing.
+
+**Slivers are not starved.** By AR>=8 starvation is 4.3% / 7.8% / 18.0% and by AR>=16 it is 0%
+everywhere. Candidate *count* is not the sliver problem, so `topk`, `min_side` and the warm-union
+gate are all aimed at the wrong population.

@@ -1633,6 +1633,52 @@ just did not turn it into mAP (S1 side=16: -0.11x floor; side=32: -1.69x floor).
 the P3-flooding accounting, the lesson: **widening the pool is the wrong lever. Slivers need the
 pool REBALANCED across levels (or hard-level assignment), not enlarged.**
 
+## Wave B (S1/S2/A8) — the sliver line, and the P3-flood + boundary findings
+
+Started from the question "why does A2 help tianchifabirc but collapse 3cad, and can one config
+get the sliver gain without the collapse". A7 (ms16 + ar_rfla@4, 3 seeds) confirmed the gain on
+tianchifabirc (mAP +5.26x floor, p=0.0035) and collapsed 3/3 seeds on 3cad -- the stability law
+holds: on 3cad, any arm that removes the model's prediction from the topk ranking collapses
+(ar_rfla alone also collapsed at ep11; the earlier 62-ep "still training" check counted rows but
+not mAP and was wrong). A7 is the final tianchifabirc config.
+
+Two measurement findings killed the "widen the pool" alternative:
+
+1. P3 flooding. Raising the sliver's short side buys mostly P3 anchors: floor 16/32/48/64 on a
+   5x634 sliver gives P3 pools 160/320/480/640 against P5 0/0/40/40. Inflation is weighted by
+   grid density, so it floods the level that already has hundreds and the model keeps choosing
+   P3. Trained-model probe confirms: baseline ckpt picks 64/30/6% P3/P4/P5 and does not re-rank
+   when the pool widens post hoc; the S1(side=32)-trained ckpt moved to 42/54/4% but got no mAP
+   out of it (S1 side=16: -0.11x floor; side=32: -1.69x floor on tianchifabirc).
+
+2. Boundary bug. With the strict inside test, a floor equal to the target level's stride puts
+   that level's single anchor column exactly on the box boundary and yields ZERO anchors of it
+   (floor=32 -> P5=0). S2's floor = long-side stride therefore never delivered its own target
+   level. A floor of 2x the stride is required. This also means S1 side=32 only ever offered P4.
+
+S2 (floor='long') was queued and then cancelled on both datasets once the S1 data killed the
+mechanism; the finding is recorded rather than run out.
+
+### A8 (`tal_prior=level_assign`) — Louis's rule, parameter-free: hard level, soft within
+
+Long side picks the target level (largest stride s with 2s <= long); the GT pools the inside-box
+anchors of that level plus the finer neighbour; short side inflated to 2x the target stride
+(boundary bug); topk stays the model's align_metric within the allowed levels. Measured pools:
+5x634 -> 0/160/40 (P3 flood gone), 40x40 -> 16/4/0 (squares naturally stay fine, no AR gate),
+100x100 -> 0/36/16, 40x10 -> 64/16/0, 8x8 -> 4/0/0. Runs: tianchifabirc (68 ep),
+3cad (18 ep -- the stability-law judgment), dspcbsd (5 ep, negative control). The 3cad run is the
+first arm to test whether a hard LEVEL cut alone destabilizes when the within-level ranking is
+left to the model; if it trains, the stability law's precise boundary is the within-level choice.
+
+### Queue state 2026-08-23 12:10
+
+Training: tianchifabirc_a8 (68 ep, gpu3), 3cad_a8 (18 ep, gpu4), 3cad_s2_long (19 ep, gpu4 —
+leftover waiter race, will be killed), 3cad_y11_base_s2 (19 ep, gpu5), dspcbsd_a8 (5 ep, gpu5),
+coco_a7_s2 (14 ep, gpu6), coco_baseline_s2 (25 ep, gpu7). Queued yolo11 wave: base + A7 for
+3cad/tianchifabirc/coco, s0/s1 each (s2 chains already running/launched separately). yolo11
+per-arm wall time is ~2.1x yolo26n, so the wave is the long tail; results expected late
+2026-08-23 / 24.
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status

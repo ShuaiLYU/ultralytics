@@ -3,6 +3,69 @@
 Logbook for branch `yolo26-defect-bench`. Assignment: [TASK.md](TASK.md).
 All metrics rounded to 4 decimal places. Every entry states the `--snap` commit, weight, and dataset yaml.
 
+# CURRENT STATE — the one place to read first (2026-08-23 12:10)
+
+Everything below this section is chronological history; snapshots there were true when written and may be
+superseded. THIS section is the current truth. Protocol locked: `yolo26n`, 100 ep, `imgsz=640`,
+`batch=128`, `coco_eval=True`, 3 seeds/arm; best epoch by `metrics/mAP50-95(B)`, AP_small from the same row.
+
+## Confirmed winners (3 seeds, p < 0.05)
+
+| dataset       | config      | args                                              | mAP50-95                      | AP_small                         | cost                    |
+| ------------- | ----------- | ------------------------------------------------- | ----------------------------- | -------------------------------- | ----------------------- |
+| 3cad          | **A1 ms16** | `tal_min_side=16`                                 | 0.2972 (+1.51x fl, p=0.048)   | 0.2373 (**+2.39x fl, p=0.0062**) | zero                    |
+| 3cad          | A1 ms32     | `tal_min_side=32`                                 | 0.3035 (+3.01x, p=0.031)      | 0.2281 (+1.90x, p=0.008)         | zero                    |
+| 3cad          | k=6         | `yolo26n-k6.yaml` + donor                         | 0.3064 (+3.71x, p=0.049)      | 0.2393 (+2.50x, p=0.044)         | 1.35x FLOPs             |
+| tianchifabirc | **A7**      | `tal_min_side=16 tal_prior=ar_rfla tal_ar_rfla=4` | 0.2161 (**+5.26x, p=0.0035**) | 0.1275 (+0.65x, p=0.14)          | zero, ~12% slower train |
+| tianchifabirc | A2 rfla     | `tal_prior=rfla`                                  | 0.2158 (+5.19x, p=0.0069)     | 0.1335 (+1.36x, p=0.028)         | zero                    |
+| dspcbsd       | —           | —                                                 | nothing moves it              | (saturated)                      | —                       |
+
+Baselines (3 seeds): 3cad 0.2908 / 0.1925; tianchifabirc 0.1909 / 0.1220; dspcbsd 0.4765 / 0.3985.
+Noise floors (2sd): 3cad 0.0042 / 0.0187; tianchifabirc 0.0048 / 0.0084; dspcbsd 0.0067 / 0.0016.
+The two winners do not stack with k=6 (combinations equal the larger single arm on both datasets).
+
+## Closed lines (with the one-line reason)
+
+- **A2.2 `rfla_fill`** — no-op everywhere tested (3cad n=3 mAP +0.60x p=0.578; tianchifabirc n=1 +0.35x).
+- **A3 `tal_metric=nwd` (all betas)** — collapses (beta 6, 2) or below baseline (beta 1: -7.07x).
+  Control `ciou beta=1` is -1.57x, so nwd itself is the -5.5x.
+- **A4 k6 x assigner** — no stacking (k6xms32 AP_S +2.56x p=0.041 ≈ k6 alone; k6xrfla p=0.158 vs rfla).
+- **S1/S2 short-side inflation** — wrong lever: inflation floods P3 (floor 16/32/48/64 -> P3 160/320/480/640
+  vs P5 0/0/40/40), and the model does not choose coarse anchors on its own. S2 cancelled before running.
+- **Tie-bug fix alone (`inside_fix`)** — real default-code bug (pool<10 GTs lose positives to zero ties;
+  670 tianchifabirc / 777 3cad GTs affected) but fixing it alone is a no-op on tianchifabirc (+0.63x).
+
+## Laws and mechanism facts
+
+- **3cad stability law**: any arm that removes the model's prediction from the topk ranking collapses
+  (rfla ep9, geom_topk ep11, ar_rfla ep11, nwd beta<=2, A7 3/3). All arms that keep the ranking are stable
+  (baseline, ms8-32, rfla_fill, inside_fix). No dataset-specific sliver treatment exists for 3cad.
+- **Sliver mechanism (final, index-corrected)**: rfla reroutes slivers to P5 (11.5x637.5: inside pool
+  160/40/0, rfla picks 0/0/10). Pool widening does NOT replicate this -- a converged model keeps picking
+  P3 (64/30/6% P3/P4/P5) even when the pool is widened post hoc.
+- **Bit-exact anchor**: coco8 3-epoch hash `512f46b7...` (drifted from 7086e13e due to environment, not code).
+
+## In flight / queued
+
+- **A8 `tal_prior=level_assign`** (Louis's rule: long side picks the level, pool = that level + finer
+  neighbour, topk stays the model's): tianchifabirc (68 ep, healthy), 3cad (18 ep — the test of whether a
+  hard LEVEL cut alone triggers the stability law), dspcbsd (5 ep, negative control).
+- **yolo11 wave**: baseline + A7, 3 datasets x 3 seeds (architecture-generality check; ~2.1x wall time,
+  long tail into 2026-08-24).
+
+## Corrigendum ledger (superseded claims, newest first)
+
+1. **"rfla routes slivers to coarse levels" is TRUE.** It was retracted in the A2.4 section based on a
+   level-indexing bug in the measuring script; the index-corrected re-measure in the S1/S2 section
+   re-establishes it (160/40/0 -> 0/0/10).
+2. **"tie bug is half of A2's gain" is FALSE.** The A2.4 section attributed geom_topk's +2.69x to the bug
+   fix; inside_fix (the fix alone) is +0.63x, so the +2.69x was the geometric ranking itself.
+3. **"3cad_a25_arrfla4 alive at 62 ep" was a false negative** — the check counted rows, not mAP. It
+   collapsed at ep11.
+4. **dspcbsd AP_small x-floor readings overstate** — its AP_S floor is 0.0016; always read the p column.
+
+---
+
 ## Decisions taken (deviations from TASK.md)
 
 | TASK.md says                         | We do                                          | Why                                                                                                                                                 |

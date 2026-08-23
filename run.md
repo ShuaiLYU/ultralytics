@@ -1594,6 +1594,45 @@ The "A2 routes slivers to coarse levels" mechanism recorded earlier is wrong -- 
 inside. The correct mechanism is the topk-ranking control described above. The run.md sections that repeat
 the routing story should be read with this in mind; the experimental numbers were never affected.
 
+## S1/S2 — short-side inflation is the wrong lever for slivers; a boundary bug hid it
+
+Two findings from the S1/S2 line, both measured on tianchifabirc:
+
+### The pool inflation mostly buys P3, not the coarse levels
+
+Per-column accounting of the pool for a 5x634 sliver (anchor centres at (i+0.5)\*stride, strict
+inside-box test, box centred at 320):
+
+| floor | P3      | P4  | P5  |
+| ----- | ------- | --- | --- |
+| 16    | 160     | 0   | 0   |
+| 32    | 320     | 80  | 0   |
+| 48    | **480** | 80  | 40  |
+| 64    | **640** | 160 | 40  |
+
+Every +8px of short side adds a full column of ~80 P3 anchors but only ~20 P5 per +32px. The
+inflation is weighted by grid density, so the money goes to the finest level -- exactly where the
+sliver already has hundreds of anchors. That is why the model keeps choosing P3: the pool is
+flooded with them, not because coarse anchors are unselectable in principle.
+
+### The boundary bug: floor == target stride yields ZERO anchors on that level
+
+With the strict inside-box test, raising the short side to exactly the stride of the level we want
+puts that level's single anchor column ON the boundary, and the strict inequalities kill it:
+5x634 with floor=32 -> P5 = 0. The S2 rule `floor = stride of the long side's level` therefore
+never delivers its own target level (it hits 32 exactly). A floor of 2x the stride (48-64) is
+required before P5 anchors enter at all.
+
+### Measured behaviour on the trained models
+
+`scripts`-level probe (train-mode forward + assigner, 30 sliver GTs): a baseline checkpoint shows
+64/30/6% positives on P3/P4/P5 and does not change when the S2 floor is applied post hoc --
+converged models do not re-rank when the pool widens. An S1-trained checkpoint (side=32) shows
+42/54/4% even with the floor off: the model DID learn a coarser preference during training, it
+just did not turn it into mAP (S1 side=16: -0.11x floor; side=32: -1.69x floor). Combined with
+the P3-flooding accounting, the lesson: **widening the pool is the wrong lever. Slivers need the
+pool REBALANCED across levels (or hard-level assignment), not enlarged.**
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status

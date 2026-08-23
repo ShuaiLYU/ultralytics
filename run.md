@@ -6,7 +6,7 @@ All metrics rounded to 4 decimal places. Every entry states the `--snap` commit,
 # CURRENT STATE — the one place to read first (2026-08-23 12:10)
 
 Everything below this section is chronological history; snapshots there were true when written and may be
-superseded. THIS section is the current truth. Protocol locked: `yolo26n`, 100 ep, `imgsz=640`,
+superseded. THIS section is the current truth. Naming, metric, and table rules live in [CONVENTIONS.md](CONVENTIONS.md); new runs and tables follow it. Protocol locked: `yolo26n`, 100 ep, `imgsz=640`,
 `batch=128`, `coco_eval=True`, 3 seeds/arm; best epoch by `metrics/mAP50-95(B)`, AP_small from the same row.
 
 ## Confirmed winners (3 seeds, p < 0.05)

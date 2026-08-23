@@ -1844,3 +1844,85 @@ reports it FAILED, which is a misclassification — it writes no training comple
 | Z3 position ablation   | only if `k=6` survives the seed replicates — widen layer 3 only, or the stem too                |
 | Z3 x Z7                | `k=6` at `imgsz=960` on 3cad, to test whether the two are additive                              |
 | test-split + per-class | `eval_bench.py` over the finished runs; Phase A still owes these                                |
+
+---
+
+## Warm-pool probe — can the pretrained box head vote on pool MEMBERSHIP? (2026-08-23)
+
+**Question.** Every A-wave knob moves stage 1 (the inside-GT pool) because the 3cad stability law
+kills any arm that takes stage-2 ranking away from the model. One combination was untried: let the
+*warm* box head (transferred by `intersect_dicts` whenever the shape matches; the cls head is not,
+since `nc` differs from COCO) decide **membership** instead of order. This measures whether such a
+vote would have anything to say — per GT at epoch 0, how many anchors sit OUTSIDE the inside-GT pool
+while `bbox_nwd(pred_box, gt) >= tau`. NWD, not IoU: IoU vanishes at these sizes, and its flatness
+is the point when it is used as a gate rather than a ranking.
+
+Script: `scripts/anomaly_bench/warm_pool.py` (commit `3362cde5b`), o2m head, 10 batches, epoch 0,
+`yolo26n.pt` donor, `imgsz=640 batch=128`. Logs + CSVs in `runs/yolo26-defect-bench/warm_<ds>/`.
+
+```bash
+# on ultra6, after `expman-cli bundle` from the laptop worktree
+cd ~/ultra_louis_work/ultralytics
+for d in 3cad tianchifabirc dspcbsd; do
+  mkdir -p runs/yolo26-defect-bench/warm_$d
+  ~/miniconda3/envs/ultra/bin/python scripts/anomaly_bench/warm_pool.py \
+    --data /data/shared-datasets/louis_data/anomaly_bench/$d/data.yaml \
+    --device 0 --steps 10 --project runs/yolo26-defect-bench --name warm_$d \
+    > runs/yolo26-defect-bench/warm_$d/run.log 2>&1
+done
+```
+
+### Result 1 — the starved fraction ranks the datasets exactly as the A-wave outcomes do
+
+| dataset   | GTs measured | starved (pool<10) | starved short side | starved pool (P3/P4/P5) | A-wave outcome                    |
+| --------- | ------------ | ----------------- | ------------------ | ----------------------- | --------------------------------- |
+| `3cad`    | 1207         | **44.3%**         | 8.5 px             | 4.86 (3.66/0.93/0.26)   | ms16, ms32, k6 all confirmed      |
+| `tianchi` | 3166         | **31.4%**         | 7.1 px             | 5.20 (3.95/1.00/0.25)   | rfla, A7 confirmed (+5.19/+5.26x) |
+| `dspcbsd` | 3606         | **14.3%**         | 14.1 px            | 6.32 (4.65/1.36/0.30)   | "nothing moves it"                |
+
+44% / 31% / 14% is the same order as responsiveness to assignment knobs, and dspcbsd's flatness now
+has a measured cause rather than a guess. This is the first quantity that predicts, before training,
+whether a dataset can respond to an assigner change at all.
+
+### Result 2 — the warm gate fires, but weakly, and weakest where the biggest win already is
+
+Anchors per GT gained (outside the pool and `nwd >= tau`), against the warm anchors already inside:
+
+| dataset   | group   | tau=0.3 out/in | tau=0.5 out/in | tau=0.7 out/in | mean best nwd outside |
+| --------- | ------- | -------------- | -------------- | -------------- | --------------------- |
+| `3cad`    | starved | 6.10 / 2.46    | 2.34 / 1.93    | 0.74 / 1.21    | 0.4345                |
+| `3cad`    | healthy | 145.16 / 74.72 | 17.83 / 38.60  | 2.01 / 10.06   | 0.6693                |
+| `tianchi` | starved | 3.78 / 1.88    | 1.07 / 1.12    | 0.22 / 0.44    | 0.3247                |
+| `tianchi` | healthy | 355.63 / 283.75| 12.23 / 74.85  | 0.66 / 6.86    | 0.4802                |
+| `dspcbsd` | starved | 11.77 / 3.53   | 3.32 / 2.37    | 0.57 / 1.14    | 0.5205                |
+| `dspcbsd` | healthy | 354.40 / 211.30| 28.87 / 101.60 | 2.59 / 23.15   | 0.6891                |
+
+Readings:
+
+- **The gate does not fill a starved pool.** At `tau=0.5` a starved 3cad GT goes 4.86 -> ~7.2, still
+  under `topk=10`. Filling it needs `tau=0.3`, which simultaneously hands healthy GTs 145-355 extra
+  anchors — the same flood failure mode that closed S1/S2.
+- **The warm head's opinion about tiny defects is mediocre.** Mean best outside-pool NWD for starved
+  GTs is only 0.4345 / 0.3247 / 0.5205, so at `tau=0.5` only 43.7% / 24.4% / 58.1% of starved GTs
+  gain even one anchor. COCO-warm localisation does not transfer strongly to 8 px defects.
+- **tianchi is the weakest**, yet it holds the largest confirmed win (A7, +5.26x). Consistent: A7/rfla
+  win by rerouting slivers to P5, not by counting. This gate cannot reproduce that mechanism.
+
+### Result 3 — tie-bug exposure at epoch 0, by dataset
+
+Zero-`align_metric` anchors inside the pool (they lose the topk tie to out-of-pool anchors that
+`mask_in_gts` then deletes): starved GTs carry 1.17 (3cad) / 2.06 (tianchi) / 0.74 (dspcbsd) of a
+~5-anchor pool. On tianchi that is 40% of the pool dead at step 0 — matching the 670-GT count
+measured earlier, and still consistent with `inside_fix` alone being a no-op (+0.63x).
+
+### Verdict
+
+The warm-union gate as specified is **not worth a 3-seed arm**: it cannot fill the starved pool at a
+`tau` that leaves healthy GTs alone, and it is weakest on the dataset with the most headroom. The
+probe's value is Result 1.
+
+The one variant the data does support is **starvation-conditional** top-up — apply the warm gate only
+where `pool < topk`, which makes the healthy-GT flood impossible by construction. That is exactly the
+existing `topup_candidates_by_rfd` path with the top-up ranked by `bbox_nwd(pred_box, gt)` instead of
+receptive-field distance. Prior against it: geometric top-up (`rfla_fill`) was already measured as a
+no-op (+0.60x, p=0.578), so the whole "fill starved GTs" family may simply not be the lever.

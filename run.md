@@ -1742,6 +1742,62 @@ coco_a7_s2 (14 ep, gpu6), coco_baseline_s2 (25 ep, gpu7). Queued yolo11 wave: ba
 per-arm wall time is ~2.1x yolo26n, so the wave is the long tail; results expected late
 2026-08-23 / 24.
 
+## The sliver mechanism, settled by elimination — pinning is the whole active ingredient (2026-08-23)
+
+Four new arms, each designed to isolate one candidate mechanism. All trained; three closed the
+question and one (1A) is in flight.
+
+### 1. `center_pool` (A9, `tal_prior=center_pool`) — centre anchoring alone is HARMFUL
+
+For AR>=4 slivers the pool is the top-10 anchors nearest the GT centre (all levels), ranking left to
+the model; compact GTs keep the legacy pool bit-equal. This is rfla's de-facto sliver behaviour minus
+the pinning.
+
+| dataset | arm      | mAP50-95                  | vs baseline                                    |
+| ------- | -------- | ------------------------- | ---------------------------------------------- |
+| tianchi | cp (n=1) | ~0.08, peak 0.0824@ep49   | **~-8x floor** — harmful, not just ineffective |
+| 3cad    | cp (n=1) | climbing normally at ep41 | stable — 4th confirmation of the stability law |
+
+Same centre candidates, model chooses = harmful; pinned (rfla) = +5.19x. The delta is 100% the
+ranking ownership. A sliver's CIoU degenerates under the strict clamp (it is CIoU, not IoU —
+`iou_calculation` runs `bbox_iou(..., CIoU=True).clamp_(0)`), so the topk ordering flips on tiny
+prediction changes and the supervision position drifts epoch to epoch. Pinning breaks the loop;
+centre pooling without pinning concentrates the drift in one spot and makes it worse.
+
+### 2. Head split — A2's gain is emergent, not additive
+
+| arm (tianchi, n=1) | mAP50-95 | vs baseline      |
+| ------------------ | -------- | ---------------- |
+| rf1_o2m            | 0.1872   | -0.76x           |
+| rf1_o2o            | 0.1720   | -3.93x           |
+| rf1 both (n=3)     | 0.2158   | +5.19x, p=0.0069 |
+
+Each half alone is harmful; only when both heads pin the same geometry do trunk and inference head
+align. The gain is an emergent property of double-headed consistency, not the sum of two head gains.
+
+### 3. `score_inflate` (1A, `tal_score_inflate`) — attack the drift at its source, first arm that may unify
+
+Instead of confiscating the ranking (A2) or reshaping the pool (S1/S2/A8/center_pool), 1A fixes the
+score that drives the ranking: sliver GTs are scored against their 2x-level-stride surrogate box
+(the same one `level_assign` uses) in `iou_calculation` only. Ranking and soft label see the
+surrogate; `get_targets` still builds the regression target from the real box. Ranking stays in the
+model's hands, so by the stability law 3cad should train.
+
+Runs: `tianchi__la+si__s0` (gpu3), `tianchi__si__s0` (gpu4), `3cad__si__s1` (gpu5). All in flight.
+If `si` alone carries part of rfla's gain and 3cad stays stable, this is the first mechanism-level
+fix rather than a dataset-specific confiscation.
+
+### 4. Housekeeping
+
+- `3cad_a8_level` final (n=1): mAP 0.3051, **+3.39x floor, stable** — the only untested positive arm
+  left from the A8 line; promotes to 3 seeds if 1A does not supersede it. Its args diff vs baseline
+  is `tal_prior=level_assign` alone (verified field-by-field; the other deltas are default-valued
+  no-ops).
+- `3cad_s2_long` (the waiter-race leftover) final: mAP 0.2966 (+1.36x), AP_S 0.2233 (+1.64x) — closes
+  S2 with the same "pool widening is not the lever" verdict as S1.
+- The earlier claim "A2's sliver picks sit in P5 because of the size term" stands; the index-corrected
+  measurement (inside 160/40/0 -> rfla 0/0/10) is in the S1/S2 section above.
+
 # EXPERIMENT INDEX — maintained, canonical
 
 **Every run on this branch, one row each. Keep this current: add a row when a run is launched (status
@@ -1851,7 +1907,7 @@ reports it FAILED, which is a misclassification — it writes no training comple
 
 **Question.** Every A-wave knob moves stage 1 (the inside-GT pool) because the 3cad stability law
 kills any arm that takes stage-2 ranking away from the model. One combination was untried: let the
-*warm* box head (transferred by `intersect_dicts` whenever the shape matches; the cls head is not,
+_warm_ box head (transferred by `intersect_dicts` whenever the shape matches; the cls head is not,
 since `nc` differs from COCO) decide **membership** instead of order. This measures whether such a
 vote would have anything to say — per GT at epoch 0, how many anchors sit OUTSIDE the inside-GT pool
 while `bbox_nwd(pred_box, gt) >= tau`. NWD, not IoU: IoU vanishes at these sizes, and its flatness
@@ -1888,14 +1944,14 @@ whether a dataset can respond to an assigner change at all.
 
 Anchors per GT gained (outside the pool and `nwd >= tau`), against the warm anchors already inside:
 
-| dataset   | group   | tau=0.3 out/in | tau=0.5 out/in | tau=0.7 out/in | mean best nwd outside |
-| --------- | ------- | -------------- | -------------- | -------------- | --------------------- |
-| `3cad`    | starved | 6.10 / 2.46    | 2.34 / 1.93    | 0.74 / 1.21    | 0.4345                |
-| `3cad`    | healthy | 145.16 / 74.72 | 17.83 / 38.60  | 2.01 / 10.06   | 0.6693                |
-| `tianchi` | starved | 3.78 / 1.88    | 1.07 / 1.12    | 0.22 / 0.44    | 0.3247                |
-| `tianchi` | healthy | 355.63 / 283.75| 12.23 / 74.85  | 0.66 / 6.86    | 0.4802                |
-| `dspcbsd` | starved | 11.77 / 3.53   | 3.32 / 2.37    | 0.57 / 1.14    | 0.5205                |
-| `dspcbsd` | healthy | 354.40 / 211.30| 28.87 / 101.60 | 2.59 / 23.15   | 0.6891                |
+| dataset   | group   | tau=0.3 out/in  | tau=0.5 out/in | tau=0.7 out/in | mean best nwd outside |
+| --------- | ------- | --------------- | -------------- | -------------- | --------------------- |
+| `3cad`    | starved | 6.10 / 2.46     | 2.34 / 1.93    | 0.74 / 1.21    | 0.4345                |
+| `3cad`    | healthy | 145.16 / 74.72  | 17.83 / 38.60  | 2.01 / 10.06   | 0.6693                |
+| `tianchi` | starved | 3.78 / 1.88     | 1.07 / 1.12    | 0.22 / 0.44    | 0.3247                |
+| `tianchi` | healthy | 355.63 / 283.75 | 12.23 / 74.85  | 0.66 / 6.86    | 0.4802                |
+| `dspcbsd` | starved | 11.77 / 3.53    | 3.32 / 2.37    | 0.57 / 1.14    | 0.5205                |
+| `dspcbsd` | healthy | 354.40 / 211.30 | 28.87 / 101.60 | 2.59 / 23.15   | 0.6891                |
 
 Readings:
 
@@ -1946,18 +2002,18 @@ done
 
 Per-group detail (median short/long px, median pool, mean per-GT level share, % starved):
 
-| dataset   | AR      | short | long  | pool | P3/P4/P5 per GT | P3-only | starved |
-| --------- | ------- | ----- | ----- | ---- | --------------- | ------- | ------- |
-| `3cad`    | 1-2     | 15.8  | 21.5  | 8.0  | 77/19/5         | 10.2%   | 54.1%   |
-| `3cad`    | 4-8     | 9.7   | 50.8  | 14.0 | 77/18/5         | 6.5%    | 31.9%   |
-| `3cad`    | 8-16    | 9.6   | 103.9 | 25.0 | 76/19/5         | 3.2%    | 4.3%    |
-| `3cad`    | >=16    | 9.8   | 247.4 | 57.0 | 75/21/4         | 0.0%    | 0.0%    |
-| `tianchi` | 1-2     | 16.4  | 23.6  | 8.0  | 76/20/5         | 10.3%   | 52.3%   |
-| `tianchi` | 4-8     | 7.6   | 47.2  | 13.0 | 76/19/5         | 2.7%    | 34.2%   |
-| `tianchi` | 8-16    | 9.2   | 107.2 | 26.0 | 76/20/5         | 2.4%    | 7.8%    |
-| `tianchi` | >=16    | 7.5   | 291.2 | 76.5 | 75/20/5         | 3.0%    | 0.0%    |
-| `dspcbsd` | 1-2     | 37.5  | 48.0  | 38.0 | 76/19/5         | 0.9%    | 14.9%   |
-| `dspcbsd` | >=16    | 9.2   | 192.1 | 36.0 | 69/28/2         | 0.0%    | 0.0%    |
+| dataset   | AR   | short | long  | pool | P3/P4/P5 per GT | P3-only | starved |
+| --------- | ---- | ----- | ----- | ---- | --------------- | ------- | ------- |
+| `3cad`    | 1-2  | 15.8  | 21.5  | 8.0  | 77/19/5         | 10.2%   | 54.1%   |
+| `3cad`    | 4-8  | 9.7   | 50.8  | 14.0 | 77/18/5         | 6.5%    | 31.9%   |
+| `3cad`    | 8-16 | 9.6   | 103.9 | 25.0 | 76/19/5         | 3.2%    | 4.3%    |
+| `3cad`    | >=16 | 9.8   | 247.4 | 57.0 | 75/21/4         | 0.0%    | 0.0%    |
+| `tianchi` | 1-2  | 16.4  | 23.6  | 8.0  | 76/20/5         | 10.3%   | 52.3%   |
+| `tianchi` | 4-8  | 7.6   | 47.2  | 13.0 | 76/19/5         | 2.7%    | 34.2%   |
+| `tianchi` | 8-16 | 9.2   | 107.2 | 26.0 | 76/20/5         | 2.4%    | 7.8%    |
+| `tianchi` | >=16 | 7.5   | 291.2 | 76.5 | 75/20/5         | 3.0%    | 0.0%    |
+| `dspcbsd` | 1-2  | 37.5  | 48.0  | 38.0 | 76/19/5         | 0.9%    | 14.9%   |
+| `dspcbsd` | >=16 | 9.2   | 192.1 | 36.0 | 69/28/2         | 0.0%    | 0.0%    |
 
 **Sliver share predicts the sliver-knob effect size.** AR>=4 is 54.6% / 26.1% / 7.6% for
 tianchi / 3cad / dspcbsd, matching where `rfla` and A7 pay: tianchi +5.19x/+5.26x, 3cad collapses
@@ -1965,14 +2021,14 @@ tianchi / 3cad / dspcbsd, matching where `rfla` and A7 pay: tianchi +5.19x/+5.26
 above, the two populations now have separate, measured causes.
 
 **Law — the pool's level composition is constant at 76/19/5.** A GT's per-level pool is its area over
-that level's stride squared, so the shares are `(1/64):(1/256):(1/1024)` = 76:19:5 for *every* GT:
+that level's stride squared, so the shares are `(1/64):(1/256):(1/1024)` = 76:19:5 for _every_ GT:
 tiny, huge, square or sliver (measured range across all 15 groups: 69-77 / 18-28 / 2-5%). Two
 consequences:
 
 - **No box-widening knob can change which level answers for a sliver.** Widening scales all three
   levels together and leaves the share fixed — this is the mechanism behind the S1/S2 P3 flood, and
   it makes the whole "raise the short side" family dead for slivers, not just badly dosed.
-- Only a prior that *replaces* the pool with a level-aware rule (`rfla`, `ar_rfla`) can move a sliver
+- Only a prior that _replaces_ the pool with a level-aware rule (`rfla`, `ar_rfla`) can move a sliver
   to a coarse level. A7 (`ms16` + `ar_rfla4`) is exactly that split — geometric cure for the square
   population, pool replacement for the sliver population — which is now explained rather than found.
 
@@ -1983,5 +2039,5 @@ consistent with this (P4 = 40, not 0); the P5 zero there is the `floor` of a 637
 the short side vanishing.
 
 **Slivers are not starved.** By AR>=8 starvation is 4.3% / 7.8% / 18.0% and by AR>=16 it is 0%
-everywhere. Candidate *count* is not the sliver problem, so `topk`, `min_side` and the warm-union
+everywhere. Candidate _count_ is not the sliver problem, so `topk`, `min_side` and the warm-union
 gate are all aimed at the wrong population.

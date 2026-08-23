@@ -3,55 +3,96 @@
 Logbook for branch `yolo26-defect-bench`. Assignment: [TASK.md](TASK.md).
 All metrics rounded to 4 decimal places. Every entry states the `--snap` commit, weight, and dataset yaml.
 
-# CURRENT STATE — the one place to read first (2026-08-23 12:10)
+# CURRENT STATE — the one place to read first (2026-08-23 15:50)
 
 Everything below this section is chronological history; snapshots there were true when written and may be
 superseded. THIS section is the current truth. Naming, metric, and table rules live in [CONVENTIONS.md](CONVENTIONS.md); new runs and tables follow it. Protocol locked: `yolo26n`, 100 ep, `imgsz=640`,
 `batch=128`, `coco_eval=True`, 3 seeds/arm; best epoch by `metrics/mAP50-95(B)`, AP_small from the same row.
 
-## Confirmed winners (3 seeds, p < 0.05)
+## The one table, per dataset (the canonical 9-column format)
 
-| dataset       | config      | args                                              | mAP50-95                      | AP_small                         | cost                    |
-| ------------- | ----------- | ------------------------------------------------- | ----------------------------- | -------------------------------- | ----------------------- |
-| 3cad          | **A1 ms16** | `tal_min_side=16`                                 | 0.2972 (+1.51x fl, p=0.048)   | 0.2373 (**+2.39x fl, p=0.0062**) | zero                    |
-| 3cad          | A1 ms32     | `tal_min_side=32`                                 | 0.3035 (+3.01x, p=0.031)      | 0.2281 (+1.90x, p=0.008)         | zero                    |
-| 3cad          | k=6         | `yolo26n-k6.yaml` + donor                         | 0.3064 (+3.71x, p=0.049)      | 0.2393 (+2.50x, p=0.044)         | 1.35x FLOPs             |
-| tianchifabirc | **A7**      | `tal_min_side=16 tal_prior=ar_rfla tal_ar_rfla=4` | 0.2161 (**+5.26x, p=0.0035**) | 0.1275 (+0.65x, p=0.14)          | zero, ~12% slower train |
-| tianchifabirc | A2 rfla     | `tal_prior=rfla`                                  | 0.2158 (+5.19x, p=0.0069)     | 0.1335 (+1.36x, p=0.028)         | zero                    |
-| dspcbsd       | —           | —                                                 | nothing moves it              | (saturated)                      | —                       |
+### 3cad — baseline n=3: mAP50-95 0.2908 / AP_small 0.1925, floors 0.0042 / 0.0187
 
-Baselines (3 seeds): 3cad 0.2908 / 0.1925; tianchifabirc 0.1909 / 0.1220; dspcbsd 0.4765 / 0.3985.
-Noise floors (2sd): 3cad 0.0042 / 0.0187; tianchifabirc 0.0048 / 0.0084; dspcbsd 0.0067 / 0.0016.
-The two winners do not stack with k=6 (combinations equal the larger single arm on both datasets).
+| baseline +   | n   | mAP50-95  | Δ×floor | p     | AP_small | Δ×floor   | p         | cost        | status                       |
+| ------------ | --- | --------- | ------- | ----- | -------- | --------- | --------- | ----------- | ---------------------------- |
+| — (baseline) | 3   | 0.2908    | —       | —     | 0.1925   | —         | —         | 0           | —                            |
+| **ms16**     | 3   | 0.2972    | +1.51   | 0.048 | 0.2373   | **+2.39** | **0.006** | 0           | confirmed                    |
+| ms32         | 3   | 0.3035    | +3.01   | 0.031 | 0.2281   | +1.90     | 0.008     | 0           | confirmed                    |
+| k6           | 3   | 0.3065    | +3.72   | 0.049 | 0.2394   | +2.51     | 0.045     | 1.35× FLOPs | confirmed                    |
+| k6+ms16      | 3   | 0.3020    | +2.66   | 0.064 | 0.2076   | +0.81     | 0.098     | 1.35×       | closed (no stacking)         |
+| k6+ms32      | 3   | 0.3036    | +3.04   | 0.075 | 0.2404   | +2.56     | 0.041     | 1.35×       | closed (no stacking)         |
+| fill         | 3   | 0.2934    | +0.60   | 0.578 | 0.1931   | +0.03     | 0.936     | 0           | closed                       |
+| la           | 1?  | 0.3051    | +3.39   | —     | 0.2126   | +1.08     | —         | 0           | screening — **owes 2 seeds** |
+| s2           | 1?  | 0.2966    | +1.36   | —     | 0.2233   | +1.64     | —         | 0           | closed                       |
+| s1_16        | 1?  | 0.2961    | +1.25   | —     | 0.1978   | +0.28     | —         | 0           | closed                       |
+| s1_32        | 1?  | 0.2943    | +0.83   | —     | 0.2007   | +0.44     | —         | 0           | closed                       |
+| cp           | 1?  | in flight |         |       |          |           |           | 0           | in flight (stable so far)    |
+| si           | 1?  | in flight |         |       |          |           |           | 0           | in flight                    |
+
+### tianchi — baseline n=3: mAP50-95 0.1909 / AP_small 0.1220, floors 0.0048 / 0.0084
+
+| baseline +    | n   | mAP50-95                            | Δ×floor   | p          | AP_small | Δ×floor | p     | cost                 | status                            |
+| ------------- | --- | ----------------------------------- | --------- | ---------- | -------- | ------- | ----- | -------------------- | --------------------------------- |
+| — (baseline)  | 3   | 0.1909                              | —         | —          | 0.1220   | —       | —     | 0                    | —                                 |
+| **arf4+ms16** | 3   | 0.2161                              | **+5.26** | **0.0035** | 0.1275   | +0.65   | 0.14  | 0, train ~12% slower | confirmed (final config)          |
+| rf1           | 3   | 0.2158                              | +5.19     | 0.0069     | 0.1335   | +1.36   | 0.028 | 0                    | confirmed                         |
+| arf4          | 1?  | 0.2190                              | +5.85     | —          | 0.1387   | +1.99   | —     | 0                    | screening — **owes 2 seeds**      |
+| k6+rf1        | 3   | 0.2223                              | +6.55     | 0.0001     | 0.1289   | +0.81   | 0.091 | 1.35×                | closed (vs rf1 alone p=0.158)     |
+| k6            | 3   | 0.1943                              | +0.71     | 0.274      | 0.1291   | +0.84   | 0.459 | 1.35×                | closed                            |
+| ms16          | 3   | 0.1944                              | +0.73     | 0.121      | 0.1255   | +0.42   | 0.302 | 0                    | closed                            |
+| fill          | 1?  | 0.1925                              | +0.35     | —          | 0.1126   | −1.12   | —     | 0                    | closed                            |
+| la            | 1?  | 0.1895                              | −0.29     | —          | 0.1237   | +0.20   | —     | 0                    | closed                            |
+| rf1_o2m       | 1?  | 0.1872                              | −0.76     | —          | 0.1115   | −1.26   | —     | 0                    | closed (emergence evidence)       |
+| rf1_o2o       | 1?  | 0.1720                              | −3.93     | —          | 0.1284   | +0.76   | —     | 0                    | closed (emergence evidence)       |
+| cp            | 1?  | collapsed (~0.08, peak 0.0824@ep49) |           |            |          |         |       | 0                    | closed (centre anchoring harmful) |
+| si            | 1?  | in flight                           |           |            |          |         |       | 0                    | in flight                         |
+| la+si         | 1?  | in flight                           |           |            |          |         |       | 0                    | in flight                         |
+
+### dspcbsd — baseline n=3: mAP50-95 0.4765 / AP_small 0.3985, floors 0.0067 / 0.0016
+
+| baseline +   | n   | mAP50-95 | Δ×floor | p     | AP_small | Δ×floor | p     | cost  | status                           |
+| ------------ | --- | -------- | ------- | ----- | -------- | ------- | ----- | ----- | -------------------------------- |
+| — (baseline) | 3   | 0.4765   | —       | —     | 0.3985   | —       | —     | 0     | —                                |
+| k6           | 3   | 0.4797   | +0.48   | 0.241 | 0.4026   | +2.59   | 0.103 | 1.35× | closed                           |
+| ms16         | 3   | 0.4800   | +0.53   | 0.324 | 0.4055   | +4.35   | 0.228 | 0     | closed (negative control passes) |
+| rf1          | 1?  | 0.4803   | +0.57   | —     | 0.4110   | +7.80   | —     | 0     | screening                        |
+| la           | 1?  | 0.4811   | +0.69   | —     | 0.4011   | +1.62   | —     | 0     | screening                        |
+
+dspcbsd AP_small x-floor overstates by convention — floor is 0.0016, read the p column (all noise).
 
 ## Closed lines (with the one-line reason)
 
-- **A2.2 `rfla_fill`** — no-op everywhere tested (3cad n=3 mAP +0.60x p=0.578; tianchifabirc n=1 +0.35x).
-- **A3 `tal_metric=nwd` (all betas)** — collapses (beta 6, 2) or below baseline (beta 1: -7.07x).
-  Control `ciou beta=1` is -1.57x, so nwd itself is the -5.5x.
-- **A4 k6 x assigner** — no stacking (k6xms32 AP_S +2.56x p=0.041 ≈ k6 alone; k6xrfla p=0.158 vs rfla).
-- **S1/S2 short-side inflation** — wrong lever: inflation floods P3 (floor 16/32/48/64 -> P3 160/320/480/640
-  vs P5 0/0/40/40), and the model does not choose coarse anchors on its own. S2 cancelled before running.
-- **Tie-bug fix alone (`inside_fix`)** — real default-code bug (pool<10 GTs lose positives to zero ties;
-  670 tianchifabirc / 777 3cad GTs affected) but fixing it alone is a no-op on tianchifabirc (+0.63x).
+- **fill (rfla_fill)** — no-op everywhere tested (3cad n=3 +0.60x p=0.578; tianchi n=1 +0.35x).
+- **nwd / nwdb1 (A3, all betas)** — collapses (beta 6, 2) or below baseline (beta 1: −7.07x);
+  control `ciou beta=1` is −1.57x, so nwd itself is the −5.5x.
+- **k6 x assigner (A4)** — no stacking on either dataset.
+- **S1/S2 short-side inflation** — wrong lever: floods P3, model never chooses coarse anchors.
+- **ifx (tie-bug fix alone)** — real default-code bug but fixing it alone is a no-op (+0.63x).
+- **la on tianchi** — level routing alone is not the ingredient (−0.29x). On 3cad it is +3.39x (screening).
+- **cp (centre pooling)** — harmful on tianchi (collapsed), stable on 3cad. Centre candidates without
+  pinning concentrate the drift instead of breaking it.
+- **rf1_o2m / rf1_o2o (head split)** — each alone negative; the gain is emergent double-headed consistency.
 
 ## Laws and mechanism facts
 
-- **3cad stability law**: any arm that removes the model's prediction from the topk ranking collapses
-  (rfla ep9, geom_topk ep11, ar_rfla ep11, nwd beta<=2, A7 3/3). All arms that keep the ranking are stable
-  (baseline, ms8-32, rfla_fill, inside_fix). No dataset-specific sliver treatment exists for 3cad.
-- **Sliver mechanism (final, index-corrected)**: rfla reroutes slivers to P5 (11.5x637.5: inside pool
-  160/40/0, rfla picks 0/0/10). Pool widening does NOT replicate this -- a converged model keeps picking
-  P3 (64/30/6% P3/P4/P5) even when the pool is widened post hoc.
+- **3cad stability law** (5 confirmations): any arm that removes the model's prediction from the topk
+  ranking collapses (rfla ep9, geom_topk ep11, ar_rfla ep11, nwd beta<=2, A7 3/3). All arms that keep the
+  ranking are stable (baseline, ms8-32, rfla_fill, inside_fix, S1, la, cp). No sliver treatment for 3cad.
+- **Sliver mechanism (final)**: the assigner metric is CIoU (not IoU) with a strict clamp, and a sliver's
+  CIoU degenerates so the topk ranking loses resolution — supervision position drifts, which is the
+  disease; rfla/A7 cure it by PINNING (removing the ranking), and every gentler variant (pool widening,
+  level routing, centre pooling, head scoping) fails because it leaves the drift in place. The gain is
+  emergent: both heads must pin together. This is why no unified 3cad+tianchi config exists.
 - **Bit-exact anchor**: coco8 3-epoch hash `512f46b7...` (drifted from 7086e13e due to environment, not code).
 
 ## In flight / queued
 
-- **A8 `tal_prior=level_assign`** (Louis's rule: long side picks the level, pool = that level + finer
-  neighbour, topk stays the model's): tianchifabirc (68 ep, healthy), 3cad (18 ep — the test of whether a
-  hard LEVEL cut alone triggers the stability law), dspcbsd (5 ep, negative control).
-- **yolo11 wave**: baseline + A7, 3 datasets x 3 seeds (architecture-generality check; ~2.1x wall time,
-  long tail into 2026-08-24).
+- **1A (`si` = `tal_score_inflate`)** — the first arm that attacks the drift at its source instead of
+  confiscating the ranking: slivers are scored against their 2x-level-stride surrogate box (ranking +
+  soft label; regression target untouched). If `si` carries part of rf1's gain and 3cad stays stable,
+  it is the first mechanism-level fix. Runs: `tianchi__si__s0`, `tianchi__la+si__s0`, `3cad__si__s1`.
+- **3cad `la` and tianchi `arf4` owe their 2 remaining seeds** — the two positive n=1 arms not yet promoted.
+- **yolo11 wave** — baseline + A7, 3 datasets x 3 seeds (architecture-generality; long tail to 08-24).
 
 ## Corrigendum ledger (superseded claims, newest first)
 

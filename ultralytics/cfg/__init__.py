@@ -316,6 +316,7 @@ CFG_BOOL_KEYS = frozenset(
         "channels_last",
         "end2end",
         "cls_remap",
+        "tal_score_inflate",
     }
 )
 CFG_STR_KEYS = frozenset(

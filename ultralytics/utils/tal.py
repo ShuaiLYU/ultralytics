@@ -50,6 +50,7 @@ class TaskAlignedAssigner(nn.Module):
         ar_rfla: float = 4.0,
         sliver_ar: float = 4.0,
         sliver_floor: str = "off",
+        score_inflate: bool = False,
         sliver_side: float = 0.0,
     ):
         """Initialize a TaskAlignedAssigner object with customizable hyperparameters.
@@ -80,6 +81,8 @@ class TaskAlignedAssigner(nn.Module):
                 with a self-derived one -- the short side is raised to the stride of the level the LONG side
                 belongs to. Square GTs are automatically exempt: the derived floor never exceeds the long
                 side, and a square's short side equals it.
+            score_inflate (bool, optional): 1A -- score slivers against their 2x-level-stride surrogate box
+                in `iou_calculation` (ranking and soft label only; the regression target stays the real box).
         """
         super().__init__()
         self.topk = topk
@@ -94,6 +97,7 @@ class TaskAlignedAssigner(nn.Module):
         self.tal_ar_rfla = ar_rfla
         self.sliver_ar = sliver_ar
         self.sliver_floor = sliver_floor
+        self.score_inflate = score_inflate
         self.sliver_side = sliver_side
         self.rf_scale = rf_scale
         self.metric = metric
@@ -274,10 +278,38 @@ class TaskAlignedAssigner(nn.Module):
         # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
         pd_boxes = pd_bboxes.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]
         gt_boxes = gt_bboxes.unsqueeze(2).expand(-1, -1, na, -1)[mask_gt]
+        if self.score_inflate:  # 1A: score slivers against their 2x-level-stride surrogate box
+            gt_boxes = self.sliver_scoring_boxes(gt_boxes)
         overlaps[mask_gt] = self.iou_calculation(gt_boxes, pd_boxes)
 
         align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
         return align_metric, overlaps
+
+    def sliver_scoring_boxes(self, gt_bboxes):
+        """Return GT boxes with sliver short sides inflated to 2x their long-side level stride.
+
+        1A (`tal_score_inflate`), scoring-side only: the surrogate box feeds `iou_calculation`, so it
+        affects the topk ranking and the soft-label ceiling -- where a sliver's CIoU degenerates under
+        the strict clamp and the ranking loses resolution -- but never the regression target, which
+        `get_targets` builds from the original `gt_bboxes`. The inflation rule is the same one
+        `select_candidates_by_level` uses for the pool, so `level_assign` + `score_inflate` are coherent:
+        pool and scoring see the same surrogate, the box loss sees the real box. Works on any
+        leading-dims tensor with a trailing dim of 4.
+        """
+        strides_t = torch.tensor(self.stride, dtype=gt_bboxes.dtype, device=gt_bboxes.device)
+        nl = len(self.stride)
+        wh = gt_bboxes[..., 2:4] - gt_bboxes[..., 0:2]  # (..., 2)
+        ar = wh[..., 0] / wh[..., 1].clamp(min=1)
+        sliver = (ar >= self.sliver_ar) | (ar <= 1.0 / self.sliver_ar)
+        long = wh.max(dim=-1, keepdim=True).values
+        t = ((2 * strides_t).reshape((1,) * (gt_bboxes.dim() - 2) + (nl,)) <= long).sum(-1) - 1
+        t = t.clamp(min=0, max=nl - 1)
+        short = wh.min(dim=-1, keepdim=True).values
+        inflate = (2 * strides_t[t]).unsqueeze(-1)
+        wh_inf = wh * torch.where(short < inflate, inflate / short.clamp(min=1), torch.ones_like(short))
+        centre = (gt_bboxes[..., :2] + gt_bboxes[..., 2:4]) / 2
+        gt_inf = torch.cat((centre - wh_inf / 2, centre + wh_inf / 2), -1)
+        return torch.where(sliver.unsqueeze(-1), gt_inf, gt_bboxes)
 
     def iou_calculation(self, gt_bboxes, pd_bboxes):
         """Calculate IoU for horizontal bounding boxes.

@@ -118,6 +118,7 @@ tal_ar_rfla: 4.0 # (float) aspect-ratio gate for tal_prior='ar_rfla': sliver GTs
 tal_sliver_ar: 4.0 # (float) aspect-ratio gate for the S1/S2 sliver shape adjustment (see tal_sliver_floor)
 tal_sliver_side: 0.0 # (float) S1: short-side floor in px applied to sliver GTs before the pool test; 0 disables. Raises the pool (P4 anchors fall in) while the topk ranking stays the model's
 tal_sliver_floor: "off" # (str) S2: 'long' derives the floor from the GT itself -- short side raised to the stride of the long side's level; squares are auto-exempt; 'off' uses tal_sliver_side
+tal_score_inflate: False # (bool) 1A: score sliver GTs against their 2x-level-stride surrogate box (topk ranking + soft label only; the regression target stays the real box)
 tal_beta: 6.0 # (float) exponent on the localization half of the task-aligned metric (score^alpha * overlap^beta); 6.0 is calibrated to CIoU, and tal_metric='nwd' sits much closer to 1.0 so needs it lower
 tal_heads: both # (str) which end2end head the four knobs above apply to: 'both', 'o2m' (trains the shared trunk) or 'o2o' (the NMS-free inference head); the other head runs a stock assigner
 pose: 12.0 # (float) pose loss gain (pose tasks)

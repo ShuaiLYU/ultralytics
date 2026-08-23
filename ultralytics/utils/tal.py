@@ -208,6 +208,8 @@ class TaskAlignedAssigner(nn.Module):
             mask_in_gts = self.select_candidates_by_rfd(anc_points, anc_strides, gt_bboxes, mask_gt)
         elif self.prior == "ar_rfla":  # A2.5: geometric candidates for slivers only, inside-GT elsewhere
             mask_in_gts = self.select_candidates_by_ar_rfla(anc_points, anc_strides, gt_bboxes, mask_gt)
+        elif self.prior == "level_assign":  # A8: hard level by the long side, soft within (level + finer neighbour)
+            mask_in_gts = self.select_candidates_by_level(anc_points, anc_strides, gt_bboxes, mask_gt)
         else:
             mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
             if self.prior == "rfla_fill":
@@ -413,6 +415,37 @@ class TaskAlignedAssigner(nn.Module):
 
         lt, rb = gt_bboxes.unsqueeze(2).chunk(2, 3)  # (b, n_boxes, 1, 2) left-top, right-bottom
         return ((xy_centers - lt > eps) & (rb - xy_centers > eps)).all(3)
+
+    def select_candidates_by_level(self, xy_centers, anc_strides, gt_bboxes, mask_gt):
+        """Assign each GT a level by its long side, then pool inside-box anchors of that level + finer neighbour.
+
+        A8 (`tal_prior='level_assign'`), Louis's rule, parameter-free: a GT whose long side lands at P5
+        (2*32 <= long) pools P4+P5; at P4 (2*16 <= long < 2*32) pools P3+P4; smaller stays at P3 alone.
+        The short side is inflated to 2x the target level's stride first so that level's anchors fall
+        strictly inside the box -- at 1x they sit exactly on the boundary and the strict inside test
+        kills them (the S1/S2 boundary bug). Squares never inflate: their short side equals the long
+        side, which by construction of the level rule is >= 2x the target stride. The topk ranking
+        stays the model's align_metric within the allowed levels, unlike rfla which pins geometry.
+        """
+        strides_t = torch.tensor(self.stride, dtype=gt_bboxes.dtype, device=gt_bboxes.device)
+        nl = len(self.stride)
+        wh = gt_bboxes[..., 2:4] - gt_bboxes[..., 0:2]  # (b, n, 2)
+        long = wh.max(dim=-1, keepdim=True).values  # (b, n, 1)
+        t = ((2 * strides_t).reshape(1, 1, nl) <= long).sum(-1) - 1  # (b, n) target level index
+        t = t.clamp(min=0, max=nl - 1)
+        # inflate the SHORT side to 2x the target stride (keeps the centre)
+        short = wh.min(dim=-1, keepdim=True).values  # (b, n, 1)
+        inflate = (2 * strides_t[t]).unsqueeze(-1)  # (b, n, 1)
+        wh_inf = wh * torch.where(short < inflate, inflate / short.clamp(min=1), torch.ones_like(short))
+        centre = (gt_bboxes[..., :2] + gt_bboxes[..., 2:4]) / 2
+        gt_inf = torch.cat((centre - wh_inf / 2, centre + wh_inf / 2), -1)
+        inside = self.select_candidates_in_gts(xy_centers, gt_inf, mask_gt)
+        # allowed levels: t and t-1 (the finer neighbour)
+        lvl_idx = torch.arange(nl, device=t.device)
+        allowed_levels = ((t.unsqueeze(-1) == lvl_idx) | ((t - 1).unsqueeze(-1) == lvl_idx)).float()  # (b, n, nl)
+        anc_lvl = (anc_strides == strides_t).float()  # (h*w, nl)
+        allowed_mask = (allowed_levels @ anc_lvl.t()) > 0  # (b, n, h*w)
+        return (inside & allowed_mask).bool()
 
     def select_candidates_by_rfd(self, xy_centers, anc_strides, gt_bboxes, mask_gt):
         """Select each ground truth's candidate anchors by receptive-field distance (RFLA, arXiv:2208.08738).

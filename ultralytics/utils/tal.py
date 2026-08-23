@@ -48,6 +48,8 @@ class TaskAlignedAssigner(nn.Module):
         metric: str = "ciou",
         nwd_gamma: float = 1.0,
         ar_rfla: float = 4.0,
+        sliver_ar: float = 4.0,
+        sliver_side: float = 0.0,
     ):
         """Initialize a TaskAlignedAssigner object with customizable hyperparameters.
 
@@ -69,6 +71,10 @@ class TaskAlignedAssigner(nn.Module):
             nwd_gamma (float, optional): Normalizing-scale multiplier passed to `bbox_nwd`.
             ar_rfla (float, optional): Aspect-ratio gate for `prior='ar_rfla'`; GTs at or above it (either
                 orientation) get geometric rfla candidates, the rest keep inside-GT candidates.
+            sliver_ar (float, optional): Aspect-ratio gate for the S1 sliver shape adjustment; at or above it
+                (either orientation) the GT's short side is raised to `sliver_side` before the pool test.
+            sliver_side (float, optional): Short-side floor for sliver GTs, in pixels; 0 disables S1. Raising
+                it lets coarser-level anchors fall inside the box while the topk ranking stays the model's.
         """
         super().__init__()
         self.topk = topk
@@ -81,6 +87,8 @@ class TaskAlignedAssigner(nn.Module):
         self.min_side = min_side
         self.prior = prior
         self.tal_ar_rfla = ar_rfla
+        self.sliver_ar = sliver_ar
+        self.sliver_side = sliver_side
         self.rf_scale = rf_scale
         self.metric = metric
         self.nwd_gamma = nwd_gamma
@@ -370,6 +378,14 @@ class TaskAlignedAssigner(nn.Module):
         """
         gt_bboxes_xywh = xyxy2xywh(gt_bboxes)
         wh = gt_bboxes_xywh[..., 2:]
+        # S1: for sliver GTs (aspect ratio >= tal_sliver_side[0]), raise the SHORT side to
+        # tal_sliver_side[1] before the pool test. This is the shape-adjustment counterpart of
+        # ar_rfla: it does not touch the topk ranking (still the model's align_metric), it only
+        # lets coarser-level anchors fall inside the box so the model can choose them itself.
+        # Measured: 11.5x637.5 sliver -> inside pool 160/40/0; short->32 -> 320/80/0.
+        ar = wh[..., 0] / wh[..., 1].clamp(min=1)
+        sliver = (ar >= self.sliver_ar) | (ar <= 1.0 / self.sliver_ar)
+        wh = torch.where(sliver.unsqueeze(-1), wh.clamp(min=self.sliver_side), wh)
         floored = (
             wh.clamp(min=self.min_side)
             if self.min_side

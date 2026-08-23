@@ -210,6 +210,8 @@ CFG_FLOAT_KEYS = frozenset(
         "tal_rf_scale",
         "tal_nwd_gamma",
         "tal_ar_rfla",
+        "tal_sliver_ar",
+        "tal_sliver_side",
         "tal_beta",
         "pose",
         "kobj",

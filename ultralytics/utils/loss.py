@@ -380,6 +380,8 @@ class v8DetectionLoss:
             metric=h.tal_metric,
             nwd_gamma=h.tal_nwd_gamma,
             ar_rfla=h.tal_ar_rfla,
+            sliver_ar=h.tal_sliver_ar,
+            sliver_side=h.tal_sliver_side,
         )
         self.bbox_loss = BboxLoss(m.reg_max, inner_ratio=h.inner_ratio).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
@@ -1322,6 +1324,7 @@ class E2ELoss:
                 # their assigner one level down, in the criterion they wrap
                 assigner = getattr(criterion, "assigner", None) or criterion.vp_criterion.assigner
                 assigner.min_side, assigner.prior, assigner.metric, assigner.beta = None, "inside", "ciou", 6.0
+                assigner.sliver_side = 0.0  # S1 too is scoped per head
         self.updates = 0
         self.total = 1.0
         # init gain

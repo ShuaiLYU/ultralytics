@@ -212,6 +212,7 @@ CFG_FLOAT_KEYS = frozenset(
         "tal_ar_rfla",
         "tal_sliver_ar",
         "tal_sliver_side",
+        "tal_pin_ar",
         "tal_beta",
         "pose",
         "kobj",
@@ -317,7 +318,6 @@ CFG_BOOL_KEYS = frozenset(
         "end2end",
         "cls_remap",
         "tal_score_inflate",
-        "tal_pin_ar",
     }
 )
 CFG_STR_KEYS = frozenset(

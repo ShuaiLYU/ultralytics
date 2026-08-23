@@ -49,6 +49,7 @@ class TaskAlignedAssigner(nn.Module):
         nwd_gamma: float = 1.0,
         ar_rfla: float = 4.0,
         sliver_ar: float = 4.0,
+        sliver_floor: str = "off",
         sliver_side: float = 0.0,
     ):
         """Initialize a TaskAlignedAssigner object with customizable hyperparameters.
@@ -75,6 +76,10 @@ class TaskAlignedAssigner(nn.Module):
                 (either orientation) the GT's short side is raised to `sliver_side` before the pool test.
             sliver_side (float, optional): Short-side floor for sliver GTs, in pixels; 0 disables S1. Raising
                 it lets coarser-level anchors fall inside the box while the topk ranking stays the model's.
+            sliver_floor (str, optional): 'off' uses `sliver_side` as-is; 'long' (S2) replaces the fixed dose
+                with a self-derived one -- the short side is raised to the stride of the level the LONG side
+                belongs to. Square GTs are automatically exempt: the derived floor never exceeds the long
+                side, and a square's short side equals it.
         """
         super().__init__()
         self.topk = topk
@@ -88,6 +93,7 @@ class TaskAlignedAssigner(nn.Module):
         self.prior = prior
         self.tal_ar_rfla = ar_rfla
         self.sliver_ar = sliver_ar
+        self.sliver_floor = sliver_floor
         self.sliver_side = sliver_side
         self.rf_scale = rf_scale
         self.metric = metric
@@ -380,12 +386,19 @@ class TaskAlignedAssigner(nn.Module):
         wh = gt_bboxes_xywh[..., 2:]
         # S1: for sliver GTs (aspect ratio >= tal_sliver_side[0]), raise the SHORT side to
         # tal_sliver_side[1] before the pool test. This is the shape-adjustment counterpart of
-        # ar_rfla: it does not touch the topk ranking (still the model's align_metric), it only
-        # lets coarser-level anchors fall inside the box so the model can choose them itself.
-        # Measured: 11.5x637.5 sliver -> inside pool 160/40/0; short->32 -> 320/80/0.
+        # S1/S2: raise the SHORT side of sliver GTs before the pool test so coarser-level anchors
+        # fall inside the box -- the shape-adjustment counterpart of ar_rfla. The topk ranking is
+        # untouched (still the model's align_metric): the model chooses among the wider pool. S1 is
+        # the fixed dose (sliver_side, px); S2 derives the dose from the GT itself.
         ar = wh[..., 0] / wh[..., 1].clamp(min=1)
         sliver = (ar >= self.sliver_ar) | (ar <= 1.0 / self.sliver_ar)
-        wh = torch.where(sliver.unsqueeze(-1), wh.clamp(min=self.sliver_side), wh)
+        if self.sliver_floor == "long":  # S2: raise the short side to the stride of the LONG side's level
+            strides_t = torch.tensor(self.stride, dtype=wh.dtype, device=wh.device)
+            long = wh.max(dim=-1, keepdim=True).values
+            level_stride = strides_t[((long / 2).unsqueeze(-1) >= strides_t).sum(dim=-1).clamp(max=len(strides_t) - 1)]
+            wh = torch.where(sliver.unsqueeze(-1), wh.clamp(min=level_stride), wh)
+        else:  # S1: fixed floor, or off
+            wh = torch.where(sliver.unsqueeze(-1), wh.clamp(min=self.sliver_side), wh)
         floored = (
             wh.clamp(min=self.min_side)
             if self.min_side

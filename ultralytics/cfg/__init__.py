@@ -319,7 +319,7 @@ CFG_BOOL_KEYS = frozenset(
     }
 )
 CFG_STR_KEYS = frozenset(
-    {"optimizer", "split", "copy_paste_mode", "auto_augment", "tal_prior", "tal_metric", "tal_heads"}
+    {"optimizer", "split", "copy_paste_mode", "auto_augment", "tal_prior", "tal_metric", "tal_heads", "tal_sliver_floor"}
 )
 
 

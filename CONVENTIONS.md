@@ -55,6 +55,7 @@ a code here FIRST, then runs may use it.
 | `la`                                 | `tal_prior=level_assign`                                       | `3cad__la__s0`       |
 | `s1_16` / `s1_32`                    | `tal_sliver_side=<px>` (S1, closed line)                       | `tianchi__s1_32__s0` |
 | `s2`                                 | `tal_sliver_floor=long` (S2, closed line)                      | —                    |
+| `o2m` / `o2o`                        | head-scope suffix: `tal_heads=<head>` (only that head gets the knobs) | `tianchi__rf1_o2m__s0` |
 | `y11`                                | architecture prefix: `model=yolo11n.pt`                        | `3cad__y11base__s0`  |
 | `topk22` / `ir08` / `clspw` / `dfl0` | historical Z/M-wave knobs                                      | (read-only)          |
 

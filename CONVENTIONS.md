@@ -41,24 +41,25 @@ A run name is `<dataset>__<treatment>__s<seed>` where `<treatment>` is one or mo
 by `+`. Architecture switches are a prefix on the first code. The registry is closed: a new knob gets
 a code here FIRST, then runs may use it.
 
-| code                                 | meaning                                                               | example                |
-| ------------------------------------ | --------------------------------------------------------------------- | ---------------------- |
-| `base`                               | baseline, no knobs                                                    | `3cad__base__s0`       |
-| `k6`                                 | `model=yolo26n-k6.yaml` + donor `pretrained=.../yolo26n-k6.pt`        | `3cad__k6__s0`         |
-| `ms16` / `ms32` / `ms8` / `ms24`     | `tal_min_side=<px>`                                                   | `3cad__ms16__s0`       |
-| `rf1` / `rf4`                        | `tal_prior=rfla` + `tal_rf_scale=<n>`                                 | `tianchi__rf1__s0`     |
-| `fill`                               | `tal_prior=rfla_fill`                                                 | `3cad__fill__s0`       |
-| `arf4` / `arf2` / `arf8`             | `tal_prior=ar_rfla` + `tal_ar_rfla=<n>`                               | `tianchi__arf4__s0`    |
-| `gm`                                 | `tal_prior=geom_topk`                                                 | `3cad__gm__s0`         |
-| `ifx`                                | `tal_prior=inside_fix`                                                | `tianchi__ifx__s0`     |
-| `nwd` / `nwdg2` / `nwdb1`            | `tal_metric=nwd` (+ `tal_nwd_gamma=2` / `tal_beta=1`)                 | `3cad__nwdb1__s0`      |
-| `la`                                 | `tal_prior=level_assign`                                              | `3cad__la__s0`         |
-| `si`                                 | `tal_score_inflate=True` (1A: slivers scored vs their surrogate box)  | `tianchi__la+si__s0`   |
-| `s1_16` / `s1_32`                    | `tal_sliver_side=<px>` (S1, closed line)                              | `tianchi__s1_32__s0`   |
-| `s2`                                 | `tal_sliver_floor=long` (S2, closed line)                             | —                      |
-| `o2m` / `o2o`                        | head-scope suffix: `tal_heads=<head>` (only that head gets the knobs) | `tianchi__rf1_o2m__s0` |
-| `y11`                                | architecture prefix: `model=yolo11n.pt`                               | `3cad__y11base__s0`    |
-| `topk22` / `ir08` / `clspw` / `dfl0` | historical Z/M-wave knobs                                             | (read-only)            |
+| code                                 | meaning                                                                       | example                |
+| ------------------------------------ | ----------------------------------------------------------------------------- | ---------------------- |
+| `base`                               | baseline, no knobs                                                            | `3cad__base__s0`       |
+| `k6`                                 | `model=yolo26n-k6.yaml` + donor `pretrained=.../yolo26n-k6.pt`                | `3cad__k6__s0`         |
+| `ms16` / `ms32` / `ms8` / `ms24`     | `tal_min_side=<px>`                                                           | `3cad__ms16__s0`       |
+| `rf1` / `rf4`                        | `tal_prior=rfla` + `tal_rf_scale=<n>`                                         | `tianchi__rf1__s0`     |
+| `fill`                               | `tal_prior=rfla_fill`                                                         | `3cad__fill__s0`       |
+| `arf4` / `arf2` / `arf8`             | `tal_prior=ar_rfla` + `tal_ar_rfla=<n>`                                       | `tianchi__arf4__s0`    |
+| `gm`                                 | `tal_prior=geom_topk`                                                         | `3cad__gm__s0`         |
+| `ifx`                                | `tal_prior=inside_fix`                                                        | `tianchi__ifx__s0`     |
+| `nwd` / `nwdg2` / `nwdb1`            | `tal_metric=nwd` (+ `tal_nwd_gamma=2` / `tal_beta=1`)                         | `3cad__nwdb1__s0`      |
+| `la`                                 | `tal_prior=level_assign`                                                      | `3cad__la__s0`         |
+| `si`                                 | `tal_score_inflate=True` (1A: slivers scored vs their surrogate box)          | `tianchi__la+si__s0`   |
+| `pa16`                               | `tal_pin_ar=16` with `tal_prior=level_assign` (A10: pin only extreme slivers) | `tianchi__la+pa16__s0` |
+| `s1_16` / `s1_32`                    | `tal_sliver_side=<px>` (S1, closed line)                                      | `tianchi__s1_32__s0`   |
+| `s2`                                 | `tal_sliver_floor=long` (S2, closed line)                                     | —                      |
+| `o2m` / `o2o`                        | head-scope suffix: `tal_heads=<head>` (only that head gets the knobs)         | `tianchi__rf1_o2m__s0` |
+| `y11`                                | architecture prefix: `model=yolo11n.pt`                                       | `3cad__y11base__s0`    |
+| `topk22` / `ir08` / `clspw` / `dfl0` | historical Z/M-wave knobs                                                     | (read-only)            |
 
 Combinations join with `+`: `k6+ms16`, `arf4+ms16`, `y11arf4+ms16`.
 

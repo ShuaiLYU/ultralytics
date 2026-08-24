@@ -1,6 +1,6 @@
 # result.md — confirmed and screening gains, per dataset
 
-精选视图 of run.md's CURRENT STATE：only arms with a positive Δ on either metric. Rules and knob meanings in [CONVENTIONS.md](CONVENTIONS.md); floors per dataset per model size. 26s line is in flight — its screening rows will firm up or drop when its seeds land.
+精选视图 of run.md's CURRENT STATE：only arms with a positive Δ on either metric. 主表 8 列 + 逐 seed 明细子表（mAP50-95 / AP_small，best epoch 同口径）。Rules and knob meanings in [CONVENTIONS.md](CONVENTIONS.md). 26s line in flight — its screening rows firm up or drop when seeds land.
 
 ## 3cad
 
@@ -16,12 +16,31 @@
 | la           | 1?  | 0.3051   | +3.39   | 0.2126   | +1.08   | 0           | screening |
 | s2           | 1?  | 0.2966   | +1.36   | 0.2233   | +1.64   | 0           | screening |
 
+逐 seed（mAP50-95 / AP_small）：
+
+| arm      | s0              | s1              | s2              |
+| -------- | --------------- | --------------- | --------------- |
+| baseline | 0.2900 / 0.1882 | 0.2932 / 0.2032 | 0.2893 / 0.1861 |
+| ms16     | 0.2987 / 0.2270 | 0.2937 / 0.2360 | 0.2992 / 0.2488 |
+| ms32     | 0.2995 / 0.2331 | 0.3089 / 0.2297 | 0.3021 / 0.2216 |
+| k6       | 0.3050 / 0.2186 | 0.3004 / 0.2387 | 0.3139 / 0.2607 |
+| k6+la    | 0.3005 / 0.2112 | 0.3110 / 0.2248 | 0.3004 / 0.2260 |
+| la       | 0.3051 / 0.2126 | —               | —               |
+| s2       | 0.2966 / 0.2233 | —               | —               |
+
 **26s**（baseline n=3：mAP50-95 0.2895 / AP_small 0.2341；floor 0.0477 / 0.0271）
 
 | baseline +   | n   | mAP50-95 | Δ×floor | AP_small | Δ×floor | cost        | status    |
 | ------------ | --- | -------- | ------- | -------- | ------- | ----------- | --------- |
 | — (baseline) | 3   | 0.2895   | —       | 0.2341   | —       | 0           | —         |
 | k6+la        | 1?  | 0.3081   | +0.39   | 0.2446   | +0.39   | 1.35× FLOPs | screening |
+
+逐 seed（mAP50-95 / AP_small）：
+
+| arm      | s0              | s1              | s2              |
+| -------- | --------------- | --------------- | --------------- |
+| baseline | 0.2753 / 0.2252 | 0.2762 / 0.2273 | 0.3171 / 0.2497 |
+| k6+la    | 0.3081 / 0.2446 | —               | —               |
 
 ## tianchi
 
@@ -36,7 +55,18 @@
 | k6+la        | 3   | 0.1981   | +1.51   | 0.1305   | +1.01   | 1.35× FLOPs          | confirmed |
 | k6+rf1       | 3   | 0.2223   | +6.55   | 0.1289   | +0.81   | 1.35× FLOPs          | confirmed |
 
-**26s**（baseline n=3 已跑完，floor 已建：mAP 0.0038 / AP_small 0.0104）— no positive arm yet; k6+la s1/s2 and attribution controls in flight.
+逐 seed（mAP50-95 / AP_small）：
+
+| arm       | s0              | s1              | s2              |
+| --------- | --------------- | --------------- | --------------- |
+| baseline  | 0.1936 / 0.1255 | 0.1891 / 0.1173 | 0.1898 / 0.1233 |
+| rf1       | 0.2211 / 0.1361 | 0.2159 / 0.1287 | 0.2103 / 0.1356 |
+| arf4+ms16 | 0.2108 / 0.1263 | 0.2186 / 0.1293 | 0.2189 / 0.1268 |
+| arf4      | 0.2190 / 0.1387 | —               | —               |
+| k6+la     | 0.2008 / 0.1365 | 0.1948 / 0.1258 | 0.1988 / 0.1293 |
+| k6+rf1    | 0.2245 / 0.1318 | 0.2229 / 0.1291 | 0.2195 / 0.1257 |
+
+**26s**（baseline n=3 完成，floor 0.0038 / 0.0104）— no positive arm yet; seeds in flight.
 
 ## dspcbsd
 
@@ -47,15 +77,22 @@
 | — (baseline) | 3   | 0.4765   | —       | 0.3985   | —       | 0           | —         |
 | k6+la        | 3   | 0.4790   | +0.38   | 0.4099   | +7.14   | 1.35× FLOPs | confirmed |
 
-**26s**（baseline n=3 已跑完，floor 已建：mAP 0.0066 / AP_small 0.0199）— no positive arm yet; k6+la s1/s2 and attribution controls in flight.
+逐 seed（mAP50-95 / AP_small）：
+
+| arm      | s0              | s1              | s2              |
+| -------- | --------------- | --------------- | --------------- |
+| baseline | 0.4737 / 0.3982 | 0.4802 / 0.3979 | 0.4756 / 0.3994 |
+| k6+la    | 0.4796 / 0.4116 | 0.4747 / 0.4090 | 0.4827 / 0.4092 |
+
+**26s**（baseline n=3 完成，floor 0.0066 / 0.0199）— no positive arm yet; seeds in flight.
 
 ## Knob legend
 
-| code             | what it does                                                                                                                                                                                                                        |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ms16 / ms32      | `tal_min_side=<px>`: raise every GT's short side to this floor before the assigner's inside-GT test, so small defects recruit more candidate anchors. The topk ranking stays the model's own prediction.                            |
-| k6               | `yolo26n-k6.yaml` + donor: widen the two early downsampling convs from 3x3 to 6x6 (k=6, s=2), so nothing between the stem and P3 is stepped over. Costs 1.35x FLOPs on n, less on larger models.                                    |
-| la               | `tal_prior=level_assign`: assign each GT a detection level by its LONG side (P5 if >=64px, P4 if 32-64px, else P3), pool = that level + the finer neighbour, short side inflated to 2x the level stride. Ranking stays the model's. |
-| rf1              | `tal_prior=rfla`: replace the candidate pool with the top-10 anchors by receptive-field distance (centre distance + size match) — geometric pinning, no model ranking. All GTs.                                                     |
-| arf4 / arf4+ms16 | `tal_prior=ar_rfla` + `tal_ar_rfla=4`: the rf1 pinning applied ONLY to sliver GTs (aspect ratio >= 4); compact GTs keep the default pool. `+ms16` adds the ms16 floor on top.                                                       |
-| k6+rf1 / k6+la   | combinations: k6 backbone plus the assignment knob.                                                                                                                                                                                 |
+| code             | what it does                                                                                                                                                                                                                                                                                                    |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ms16 / ms32      | `tal_min_side=<px>`: raise every GT's short side to this floor before the assigner's inside-GT test, so small defects recruit more candidate anchors. The topk ranking stays the model's own prediction.                                                                                                        |
+| k6               | `yolo26n-k6.yaml` + donor: widen the two early downsampling convs from 3x3 to 6x6 (k=6, s=2), so nothing between the stem and P3 is stepped over. Costs 1.35x FLOPs on n, less on larger models.                                                                                                                |
+| la               | `tal_prior=level_assign`: assign each GT a detection level by its LONG side (P5 if >=64px, P4 if 32-64px, else P3), pool = that level + the finer neighbour, short side inflated to 2x the level stride. Ranking stays the model's. Does NOT include ms16/ms32 — that floor only applies to the compact branch. |
+| rf1              | `tal_prior=rfla`: replace the candidate pool with the top-10 anchors by receptive-field distance (centre distance + size match) — geometric pinning, no model ranking. All GTs.                                                                                                                                 |
+| arf4 / arf4+ms16 | `tal_prior=ar_rfla` + `tal_ar_rfla=4`: the rf1 pinning applied ONLY to sliver GTs (aspect ratio >= 4); compact GTs keep the default pool. `+ms16` adds the ms16 floor on top.                                                                                                                                   |
+| k6+rf1 / k6+la   | combinations: k6 backbone plus the assignment knob.                                                                                                                                                                                                                                                             |

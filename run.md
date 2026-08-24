@@ -60,6 +60,37 @@ superseded. THIS section is the current truth. Naming, metric, and table rules l
 
 dspcbsd AP_small x-floor overstates by convention — floor is 0.0016, read the p column (all noise).
 
+## k6+la — the first confirmed complementary combination (3 seeds, 2026-08-24)
+
+### 3cad — mAP50-95 +3.14x (p=0.0525, edge), AP_small +1.50x (p=0.0177)
+
+### tianchi — mAP50-95 +1.51x (p=0.0338), AP_small +1.01x (p=0.104)
+
+### dspcbsd — mAP50-95 +0.38x (p=0.449), AP_small +7.14x (p=0.0011)
+
+| dataset | k6 alone (mAP) | la alone (mAP) | k6+la (mAP)        | reading                                                                                                                                |
+| ------- | -------------- | -------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| 3cad    | +3.72x p=0.049 | +3.39x (n=1)   | +3.14x p=0.053     | positive but below the larger single arm — same non-stacking ceiling as all previous k6 combinations                                   |
+| tianchi | +0.71x p=0.274 | -0.29x (n=1)   | **+1.51x p=0.034** | **first confirmed complementarity**: two individually-dead arms pass together (k6 supplies sliver features, la supplies level routing) |
+| dspcbsd | +0.48x p=0.241 | +0.69x (n=1)   | +0.38x p=0.449     | mAP still a no-op, but **AP_small +7.14x p=0.0011 is dspcbsd's first significant small-object result**                                 |
+
+Per-seed mAP — 3cad `[0.3005, 0.3110, 0.3004]`; tianchi `[0.2008, 0.1948, 0.1988]`; dspcbsd
+`[0.4796, 0.4747, 0.4827]`.
+
+Notes: tianchi's +1.51x is real but small in absolute terms (+0.0073) and far below rf1/arf4's +5x;
+it is a mechanism finding (complementarity exists), not a new best config. dspcbsd's AP_small now
+has to be re-read: it is no longer "nothing moves it" — k6+la moves small objects specifically.
+
+## 26s line (in flight, own baseline pending)
+
+26s protocol forks from the locked 26n protocol: `model=yolo26s.pt`, `batch=64` (22.8 GFLOPs).
+`yolo26s-k6.yaml` resolves from the existing `yolo26-k6.yaml` scales table (s: 0.50/0.50/1024);
+donor built with `make_k6_donor.py --src yolo26s.pt --cfg yolo26s-k6.yaml`, bit-identical check
+passed. Runs launched 2026-08-24: baseline s0 x3 datasets, k6+la s0-s2 x3 datasets, and the
+attribution controls (s26k6 s0, s26la s0) queued behind them. 26s has NO floor yet — nothing on
+this line may be judged significant until its own 3-seed baseline lands (floors are not
+transferable across model sizes; 26s's will be smaller than 26n's if anything).
+
 ## Closed lines (with the one-line reason)
 
 - **fill (rfla_fill)** — no-op everywhere tested (3cad n=3 +0.60x p=0.578; tianchi n=1 +0.35x).

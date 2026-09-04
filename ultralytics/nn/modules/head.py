@@ -135,20 +135,64 @@ class Detect(nn.Module):
             )
         )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+        self.objectness = "none"  # YOLOv5-style objectness branch, see set_objectness()
 
         if end2end:
             self.one2one_cv2 = copy.deepcopy(self.cv2)
             self.one2one_cv3 = copy.deepcopy(self.cv3)
 
+    def set_objectness(self, mode: str = "none") -> None:
+        """Attach a YOLOv5-style class-agnostic objectness branch to this head.
+
+        In YOLOv5 each anchor predicts ``[box, obj, cls]``: ``obj`` answers "is there an object here" and ``cls`` only
+        "which class", with ``conf = obj * cls`` at inference. YOLOv8/26 dropped ``obj``, so the class logit doubles as
+        the confidence and the object evidence is spread over ``nc`` channels. With many classes that dilutes detection
+        confidence, which this branch undoes.
+
+        The branch is a separate ``cv_obj`` ModuleList so ``cv2``/``cv3`` stay byte-identical and load the same
+        pretrained weights in every mode, keeping A/B comparisons clean.
+
+        Args:
+            mode (str): Ladder of increasingly faithful YOLOv5 behavior, each rung adding one change: ``'none'`` no
+                branch (default, unchanged model); ``'aux'`` branch trained on IoU soft targets as auxiliary
+                supervision, inference untouched; ``'mul'`` adds ``conf = obj * cls``; ``'v5'`` additionally trains
+                ``cls`` on positives only, so background suppression rests entirely on ``obj``.
+        """
+        if mode not in {"none", "aux", "mul", "v5"}:
+            raise ValueError(f"objectness must be none/aux/mul/v5, got {mode!r}")
+        if mode != "none" and type(self) is not Detect:
+            raise NotImplementedError(f"objectness={mode!r} is implemented for Detect only, not {type(self).__name__}")
+        self.objectness = mode
+        if mode == "none":
+            return
+        ch = [m[0].conv.in_channels for m in self.cv2]  # PAN channels recovered from the box branch
+        c4 = max(16, ch[0] // 8)  # narrower than cv3: one binary score is easier than nc classes
+        ref = next(self.parameters())
+        self.cv_obj = nn.ModuleList(nn.Sequential(DWConv(x, x, 3), Conv(x, c4, 1), nn.Conv2d(c4, 1, 1)) for x in ch).to(
+            device=ref.device, dtype=ref.dtype
+        )
+        if hasattr(self, "one2one_cv2"):
+            # Deepcopied, NOT shared. A dedicated head can learn o2o's own anchor set; a shared one is pulled to
+            # o2m's ~10-positives-per-GT anchors and scores the o2o boxes, which sit elsewhere, badly.
+            self.one2one_cv_obj = copy.deepcopy(self.cv_obj)
+
     @property
     def one2many(self):
         """Returns the one-to-many head components, here for v3/v5/v8/v9/v11 backward compatibility."""
-        return {"box_head": self.cv2, "cls_head": self.cv3}
+        heads = {"box_head": self.cv2, "cls_head": self.cv3}
+        if (
+            getattr(self, "objectness", "none") != "none"
+        ):  # getattr: checkpoints predating the branch unpickle without it
+            heads["obj_head"] = self.cv_obj
+        return heads
 
     @property
     def one2one(self):
         """Returns the one-to-one head components."""
-        return {"box_head": self.one2one_cv2, "cls_head": self.one2one_cv3}
+        heads = {"box_head": self.one2one_cv2, "cls_head": self.one2one_cv3}
+        if getattr(self, "objectness", "none") != "none":
+            heads["obj_head"] = self.one2one_cv_obj
+        return heads
 
     @property
     def end2end(self):
@@ -161,7 +205,11 @@ class Detect(nn.Module):
         self._end2end = value
 
     def forward_head(
-        self, x: list[torch.Tensor], box_head: torch.nn.Module = None, cls_head: torch.nn.Module = None
+        self,
+        x: list[torch.Tensor],
+        box_head: torch.nn.Module = None,
+        cls_head: torch.nn.Module = None,
+        obj_head: torch.nn.Module = None,
     ) -> dict[str, torch.Tensor]:
         """Concatenates and returns predicted bounding boxes and class probabilities."""
         if box_head is None or cls_head is None:  # for fused inference
@@ -169,7 +217,10 @@ class Detect(nn.Module):
         bs = x[0].shape[0]  # batch size
         boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
         scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
-        return {"boxes": boxes, "scores": scores, "feats": x}
+        preds = {"boxes": boxes, "scores": scores, "feats": x}
+        if obj_head is not None:
+            preds["obj"] = torch.cat([obj_head[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
+        return preds
 
     def forward(
         self, x: list[torch.Tensor]
@@ -198,7 +249,12 @@ class Detect(nn.Module):
         """
         # Inference path
         dbox = self._get_decode_boxes(x)
-        return torch.cat((dbox, x["scores"].sigmoid()), 1)
+        scores = x["scores"].sigmoid()
+        if "obj" in x and self.objectness in {"mul", "v5"}:
+            # YOLOv5 conf = obj * cls. Fusing here keeps the output an ordinary [4 + nc] tensor, so NMS, the
+            # validators and every export format stay unchanged.
+            scores = scores * x["obj"].sigmoid()
+        return torch.cat((dbox, scores), 1)
 
     def _get_decode_boxes(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Get decoded boxes based on anchors and strides."""
@@ -212,17 +268,14 @@ class Detect(nn.Module):
 
     def bias_init(self):
         """Initialize Detect() biases, WARNING: requires stride availability."""
-        for i, (a, b) in enumerate(zip(self.one2many["box_head"], self.one2many["cls_head"])):  # from
-            a[-1].bias.data[:] = 2.0  # box
-            b[-1].bias.data[: self.nc] = math.log(
-                5 / self.nc / (640 / self.stride[i]) ** 2
-            )  # cls (.01 objects, 80 classes, 640 img)
-        if self.end2end:
-            for i, (a, b) in enumerate(zip(self.one2one["box_head"], self.one2one["cls_head"])):  # from
+        for heads in (self.one2many, self.one2one) if self.end2end else (self.one2many,):
+            for i, (a, b) in enumerate(zip(heads["box_head"], heads["cls_head"])):  # from
                 a[-1].bias.data[:] = 2.0  # box
                 b[-1].bias.data[: self.nc] = math.log(
                     5 / self.nc / (640 / self.stride[i]) ** 2
                 )  # cls (.01 objects, 80 classes, 640 img)
+            for i, c in enumerate(heads.get("obj_head", ())):  # v5 obj prior (.01 objects, 640 img)
+                c[-1].bias.data[:] = math.log(5 / (640 / self.stride[i]) ** 2)
 
     def decode_bboxes(self, bboxes: torch.Tensor, anchors: torch.Tensor, xywh: bool = True) -> torch.Tensor:
         """Decode bounding boxes from predictions."""
@@ -275,6 +328,8 @@ class Detect(nn.Module):
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
+        if getattr(self, "objectness", "none") != "none":
+            self.cv_obj = None
 
 
 class Segment(Detect):

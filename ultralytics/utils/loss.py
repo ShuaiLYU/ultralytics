@@ -334,6 +334,45 @@ class KeypointLoss(nn.Module):
         return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
 
 
+def parse_target_gamma(v: Any) -> tuple[float, float]:
+    """Parse ``obj_target``/``cls_target`` into per-branch exponents ``(o2m, o2o)``, each in [0, 10].
+
+    A positive's target is raised to a power: ``t = q ** gamma``, where ``q`` is the box CIoU for objectness and the
+    assigner's task-alignment weight for classification. The family contains both named endpoints exactly -- gamma 1
+    is the soft label (``x ** 1.0`` is bit-exact) and gamma 0 is a flat 1.0 (``0.0 ** 0.0 == 1.0``, so even a
+    zero-quality positive lands on hard) -- so soft=(1, 1), hard=(0, 0), split=(1, 0), and rsplit=(0, 1), the
+    deliberately swapped falsification control. Beware the direction: SMALLER gamma is harder, and gamma > 1 sharpens
+    past soft.
+
+    The branches get separate exponents because they want different ones. o2m gets ~10 positives per GT, so a soft
+    label is affordable and carries the ranking AP rewards; o2o gets exactly ONE, so its soft target degenerates (with
+    a single positive the align ratio is 1 by construction and the target collapses to that anchor's own quality) and
+    the head is never taught to be confident.
+
+    A power rather than a floor (``t = f + (1 - f) * q``) because the interesting region is a hair below hard, and
+    there the two differ where it matters. BCE against a target of exactly 1.0 has no finite optimum, so hard pushes
+    positive logits up without limit and saturates the near-miss anchors with them. Any gamma > 0 keeps the target off
+    1.0 and restores a finite fixed point, while leaving the ceiling quality-dependent so positives stay rank-ordered.
+
+    Accepts a named mode, a scalar (applied to both branches), or an ``o2m,o2o`` pair as a string, list or tuple.
+    """
+    named = {"soft": (1.0, 1.0), "hard": (0.0, 0.0), "split": (1.0, 0.0), "rsplit": (0.0, 1.0)}
+    if v is None:
+        return named["soft"]
+    if isinstance(v, str):
+        if v in named:
+            return named[v]
+        v = v.split(",")
+    g = [v] if not isinstance(v, (list, tuple)) else list(v)
+    try:
+        g = [float(x) for x in g] * (2 if len(g) == 1 else 1)
+    except (TypeError, ValueError):
+        raise ValueError(f"target={v!r} invalid; use {sorted(named)}, a float in [0, 10], or 'o2m,o2o'") from None
+    if len(g) != 2 or not all(0.0 <= x <= 10.0 for x in g):
+        raise ValueError(f"target={v!r} invalid; expected 1 or 2 exponents in [0, 10], got {g}")
+    return g[0], g[1]
+
+
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
 
@@ -355,6 +394,20 @@ class v8DetectionLoss:
 
         self.use_dfl = m.reg_max > 1
         self.loss_names = "box_loss", "cls_loss", "dfl_loss" if self.use_dfl else "l1_loss"
+
+        # YOLOv5-style objectness (see Detect.set_objectness). 'none' keeps the 3-term loss vector.
+        self.objectness = getattr(m, "objectness", "none")
+        if self.objectness != "none":
+            self.loss_names += ("obj_loss",)
+            # v5 weights the objectness loss per level because P3 holds most of the negatives.
+            self.obj_balance = {3: [4.0, 1.0, 0.4], 5: [4.0, 1.0, 0.25, 0.06, 0.02]}.get(
+                len(m.stride), [1.0] * len(m.stride)
+            )
+        # Objectness / classification target exponents for positives; see parse_target_gamma. A plain (non-E2E)
+        # criterion is the one2many one, so it takes the o2m element of each; E2ELoss overwrites both after
+        # construction.
+        self.obj_gamma = parse_target_gamma(getattr(h, "obj_target", "soft"))[0]
+        self.cls_gamma = parse_target_gamma(getattr(h, "cls_target", "soft"))[0]
 
         # Class weights for handling imbalanced datasets
         self.class_weights = getattr(model, "class_weights", None)
@@ -403,7 +456,7 @@ class v8DetectionLoss:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size and return foreground mask and
         target indices.
         """
-        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        loss = torch.zeros(3 + (self.objectness != "none"), device=self.device)  # box, cls, dfl[, obj]
         pred_distri, pred_scores = (
             preds["boxes"].permute(0, 2, 1).contiguous(),
             preds["scores"].permute(0, 2, 1).contiguous(),
@@ -423,7 +476,7 @@ class v8DetectionLoss:
         # Pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
 
-        _, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
+        target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
             pred_scores.detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
@@ -434,11 +487,64 @@ class v8DetectionLoss:
 
         target_scores_sum = max(target_scores.sum(), 1)
 
+        # Classification target. The assigner scales the one-hot by the task-alignment quality (tal.py, target =
+        # iou_max * align / align_max), which DEGENERATES on the o2o branch: with exactly one positive per GT the
+        # align ratio is 1 by construction, so the target collapses to that anchor's own IoU. The head is therefore
+        # never taught to be confident, and thousands of background anchors push against a single positive carrying
+        # far less target mass than o2m's ten. cls_gamma raises that quality weight to a power (1 = today, 0 = a plain
+        # one-hot), so it can be hardened on o2o alone. Deliberately applied here rather than inside the assigner:
+        # target_scores also weights the box and DFL losses, and those keep the original quality weighting so the
+        # change stays isolated to classification.
+        cls_targets = (
+            target_scores
+            if self.cls_gamma == 1.0
+            else torch.where(target_scores > 0, target_scores.pow(self.cls_gamma), target_scores)
+        )
+        cls_targets_sum = max(cls_targets.sum(), 1)  # == target_scores_sum when cls_gamma == 1
+
         # Cls loss with optional class weighting
-        bce_loss = self.bce(pred_scores, target_scores.to(dtype))  # (bs, num_anchors, nc)
-        if self.class_weights is not None:
-            bce_loss *= self.class_weights
-        loss[1] = bce_loss.sum() / target_scores_sum  # BCE
+        if self.objectness == "v5":
+            # v5 trains cls on positives only against a hard one-hot; background suppression is left entirely to the
+            # objectness branch, which is why this rung requires conf = obj * cls.
+            if fg_mask.sum():
+                pos_scores = pred_scores[fg_mask]  # (n_pos, nc)
+                t = torch.zeros_like(pos_scores)
+                t[torch.arange(t.shape[0], device=self.device), target_labels[fg_mask]] = 1.0
+                bce_loss = self.bce(pos_scores, t)
+                if self.class_weights is not None:
+                    bce_loss *= self.class_weights.view(1, -1)
+                loss[1] = bce_loss.sum() / fg_mask.sum()
+        else:
+            bce_loss = self.bce(pred_scores, cls_targets.to(dtype))  # (bs, num_anchors, nc)
+            if self.class_weights is not None:
+                bce_loss *= self.class_weights
+            loss[1] = bce_loss.sum() / cls_targets_sum  # BCE
+
+        # Objectness loss: class-agnostic BCE over ALL anchors, targeting the detached CIoU of the assigned box (v5's
+        # soft label -- a well-placed box is worth more than a sloppy one). Foreground and background are normalized
+        # separately and deliberately: v5 takes a plain mean over every cell, but here that sits next to a cls loss
+        # normalized by the positive count. With ~8 positives among 8400 anchors the two conventions differ by 2-3
+        # orders of magnitude, which starves the objectness gradient. Positives are therefore normalized by their own
+        # count, matching cls; the background term keeps v5's per-level mean and balance.
+        if self.objectness != "none":
+            pred_obj = preds["obj"].squeeze(1)  # (bs, num_anchors)
+            tobj = torch.zeros_like(pred_obj)
+            if fg_mask.sum():
+                if self.obj_gamma == 0.0:
+                    tobj[fg_mask] = 1.0  # TAL already filtered for quality; IoU supervision is box+cls's job
+                else:
+                    iou = bbox_iou(
+                        pred_bboxes[fg_mask], (target_bboxes / stride_tensor)[fg_mask], xywh=False, CIoU=True
+                    )
+                    iou = iou.detach().squeeze(-1).clamp_(0)  # clamped, so a fractional power is real
+                    tobj[fg_mask] = (iou if self.obj_gamma == 1.0 else iou.pow(self.obj_gamma)).to(tobj.dtype)
+            obj_loss = self.bce(pred_obj, tobj)  # (bs, num_anchors), reduction='none'
+            splits = [f.shape[2] * f.shape[3] for f in preds["feats"]]
+            bg = ~fg_mask
+            loss[3] = (obj_loss * fg_mask).sum() / fg_mask.sum().clamp(min=1) + sum(
+                (lvl * lvl_bg).mean() * b
+                for lvl, lvl_bg, b in zip(obj_loss.split(splits, 1), bg.split(splits, 1), self.obj_balance)
+            )
 
         # Bbox loss
         if fg_mask.sum():
@@ -460,6 +566,8 @@ class v8DetectionLoss:
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
+        if self.objectness != "none":
+            loss[3] *= self.hyp.obj  # obj gain
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
             loss,
@@ -1312,6 +1420,11 @@ class E2ELoss:
         """Initialize E2ELoss with one-to-many and one-to-one detection losses using the provided model."""
         self.one2many = loss_fn(model, tal_topk=10)
         self.one2one = loss_fn(model, tal_topk=7, tal_topk2=1)
+        # Per-branch target exponents, because the two branches have opposite needs: o2m gets ~10 positives per GT and
+        # o2o exactly one. See parse_target_gamma. obj and cls are separate channels and separate scoring paths, so
+        # they are hardened separately.
+        self.one2many.obj_gamma, self.one2one.obj_gamma = parse_target_gamma(getattr(model.args, "obj_target", "soft"))
+        self.one2many.cls_gamma, self.one2one.cls_gamma = parse_target_gamma(getattr(model.args, "cls_target", "soft"))
         self.updates = 0
         self.total = 1.0
         # init gain

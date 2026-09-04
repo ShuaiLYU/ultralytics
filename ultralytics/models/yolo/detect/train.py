@@ -185,18 +185,23 @@ class DetectionTrainer(BaseTrainer):
         model.class_weights = torch.from_numpy(weights).to(self.device)
         LOGGER.info(f"Class weights: {model.class_weights.cpu().numpy().round(3)}")
 
-    def objectness_cfg(self, cfg: str | dict | None) -> str | dict | None:
-        """Inject the ``objectness`` train arg into the model YAML dict.
+    #: Head knobs carried on ``args`` instead of in a model YAML, with the value that means "stock head".
+    HEAD_ARGS = {"objectness": "none", "o2o_grad": 0.0}
 
-        Carrying the knob on ``args`` rather than in a YAML keeps one config per architecture: the objectness rungs
-        are selected with ``objectness=aux|mul|v5`` on the launch command instead of near-identical model YAMLs. It
-        lands in ``model.yaml``, so the branch is rebuilt on resume, val and export.
+    def head_cfg(self, cfg: str | dict | None) -> str | dict | None:
+        """Inject the head knobs in ``HEAD_ARGS`` from the train args into the model YAML dict.
+
+        Carrying them on ``args`` rather than in a YAML keeps one config per architecture: the rungs are selected
+        with ``objectness=aux|mul|v5`` or ``o2o_grad=0.1`` on the launch command instead of a family of
+        near-identical model YAMLs. They land in ``model.yaml``, so the head is rebuilt the same way on resume,
+        val and export.
         """
-        mode = getattr(self.args, "objectness", "none") or "none"  # CLI smart_value("none") -> None
-        if not cfg or mode == "none":
+        # `or default` also absorbs the CLI's smart_value("none") -> None
+        set_args = {k: v for k, d in self.HEAD_ARGS.items() if (v := getattr(self.args, k, d) or d) != d}
+        if not cfg or not set_args:
             return cfg
         cfg = dict(cfg) if isinstance(cfg, dict) else yaml_model_load(cfg)
-        cfg["objectness"] = mode
+        cfg.update(set_args)
         return cfg
 
     def get_model(self, cfg: str | None = None, weights: str | None = None, verbose: bool = True):
@@ -212,7 +217,7 @@ class DetectionTrainer(BaseTrainer):
         """
         model = self.set_model_names_for_load(
             DetectionModel(
-                self.objectness_cfg(cfg), nc=self.data["nc"], ch=self.data["channels"], verbose=verbose and RANK == -1
+                self.head_cfg(cfg), nc=self.data["nc"], ch=self.data["channels"], verbose=verbose and RANK == -1
             )
         )
         if weights:

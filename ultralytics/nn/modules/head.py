@@ -34,6 +34,27 @@ __all__ = (
 )
 
 
+class _ScaleGrad(torch.autograd.Function):
+    """Identity in the forward pass, gradient scaled by ``lam`` on the way back.
+
+    Used to let the one2one branch shape the shared trunk by a fraction of its own gradient instead of the
+    all-or-nothing ``detach()``. Deliberately an autograd Function rather than the arithmetic
+    ``x * lam + x.detach() * (1 - lam)``: that form is not bit-exact to ``x`` for interior ``lam``, and a
+    perturbation of even one ulp is enough to split two otherwise identical training trajectories.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, lam: float) -> torch.Tensor:
+        """Return x unchanged, remembering the backward scale."""
+        ctx.lam = lam
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, g: torch.Tensor) -> tuple[torch.Tensor, None]:
+        """Scale the incoming gradient by lam."""
+        return g * ctx.lam, None
+
+
 class Detect(nn.Module):
     """YOLO Detect head for object detection models.
 
@@ -228,8 +249,18 @@ class Detect(nn.Module):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
         preds = self.forward_head(x, **self.one2many)
         if self.end2end:
-            x_detach = [xi.detach() for xi in x] if self.training else x  # detach keeps one2one out of the backbone
-            one2one = self.forward_head(x_detach, **self.one2one)
+            # o2o_grad is the fraction of the one2one loss's gradient that reaches the shared trunk. 0.0 keeps
+            # upstream's detach() — one2one trains its own head only and the trunk is shaped purely by one2many,
+            # which is also the branch whose output is discarded at inference. Training-only: predict/val/export
+            # take the plain x below, so no deployment path is affected.
+            lam = getattr(self, "o2o_grad", 0.0)
+            if not self.training:
+                x_o2o = x
+            elif lam == 0.0:
+                x_o2o = [xi.detach() for xi in x]  # the literal upstream line, so lam=0 is exact, not merely equal
+            else:
+                x_o2o = [_ScaleGrad.apply(xi, lam) for xi in x]
+            one2one = self.forward_head(x_o2o, **self.one2one)
             preds = {"one2many": preds, "one2one": one2one}
         if self.training:
             return preds

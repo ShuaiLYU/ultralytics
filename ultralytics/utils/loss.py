@@ -1389,8 +1389,21 @@ class E2ELoss:
         self.aux_fg_decay = bool(getattr(model.args, "aux_fg_decay", True))  # False pins the degree all run
         # Grade each term by its own assigned CIoU instead of a flat constant: t = iou ** gamma. gamma 0 is
         # bit-exact the flat target, gamma 1 is v5's soft label; SMALLER gamma is HARDER. The assigner already
-        # computed this IoU for the alignment metric, so the grading costs nothing.
-        self.aux_fg_gamma = float(getattr(model.args, "aux_fg_target", 0.0))
+        # computed this IoU for the alignment metric, so the grading costs nothing. One value applies to both
+        # terms; an 'o2m,o2o' pair sets them apart -- '0,1' keeps the o2m term a flat decaying constant while the
+        # o2o term carries the geometry, which is the half cls stops carrying at cls_target=0.
+        g = getattr(model.args, "aux_fg_target", 0.0)
+        g = [
+            float(x)
+            for x in (
+                g.replace(",", " ").split() if isinstance(g, str) else (g if isinstance(g, (list, tuple)) else [g])
+            )
+        ]
+        if len(g) == 1:
+            g *= 2
+        if len(g) != 2 or not all(0.0 <= x <= 10.0 for x in g):
+            raise ValueError(f"'aux_fg_target={g}' must be one value or an 'o2m,o2o' pair, each in [0.0, 10.0].")
+        self.aux_fg_gamma = tuple(g)  # (o2m, o2o)
         self.aux_fg_t_cur = self.aux_fg_t  # decayed across training by update()
 
     def __call__(self, preds: Any, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -1429,11 +1442,11 @@ class E2ELoss:
             (torch.Tensor): Scalar foreground auxiliary loss.
         """
         o2m, o2o = self.one2many._cache, self.one2one._cache  # dense o2m assignment, single o2o positive per GT
-        g = self.aux_fg_gamma
+        gm, go = self.aux_fg_gamma
         # The mask is applied AFTER the power: 0.0 ** 0.0 == 1.0 would otherwise light up every background
         # anchor. Powered in fp32 so a fractional exponent is not evaluated in half precision.
-        t_o2o = o2o["fg_mask"].float() if not g else o2o["iou"].float().pow(g) * o2o["fg_mask"]
-        t_o2m = o2m["fg_mask"].float() if not g else o2m["iou"].float().pow(g) * o2m["fg_mask"]
+        t_o2o = o2o["fg_mask"].float() if not go else o2o["iou"].float().pow(go) * o2o["fg_mask"]
+        t_o2m = o2m["fg_mask"].float() if not gm else o2m["iou"].float().pow(gm) * o2m["fg_mask"]
         target = torch.maximum(t_o2o, self.aux_fg_t_cur * t_o2m).unsqueeze(1)  # (bs, 1, anchors)
         loss = F.binary_cross_entropy_with_logits(aux_pred.float(), target, reduction="none")
         return loss.sum() / (o2m["fg_mask"] | o2o["fg_mask"]).sum().clamp(min=1)

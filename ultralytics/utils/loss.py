@@ -467,7 +467,7 @@ class v8DetectionLoss:
         # Pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
 
-        _, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
+        _, target_bboxes, target_scores, fg_mask, target_gt_idx, assigned_iou = self.assigner(
             pred_scores.detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
@@ -477,7 +477,9 @@ class v8DetectionLoss:
         )
 
         target_scores_sum = max(target_scores.sum(), 1)
-        self._cache = {"fg_mask": fg_mask}  # branch assignment, read by E2ELoss's aux-fg target (yolo27)
+        # Branch assignment plus the assigner's own per-anchor CIoU (it runs under no_grad, so already
+        # detached), read by E2ELoss's aux-fg target (yolo27).
+        self._cache = {"fg_mask": fg_mask, "iou": assigned_iou}
 
         # Cls loss with optional class weighting
         bce_loss = self.bce(pred_scores, target_scores.to(dtype))  # (bs, num_anchors, nc)
@@ -1140,7 +1142,7 @@ class v8OBBLoss(v8DetectionLoss):
         bboxes_for_assigner = pred_bboxes.clone().detach()
         # Only the first four elements need to be scaled
         bboxes_for_assigner[..., :4] *= stride_tensor
-        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+        _, target_bboxes, target_scores, fg_mask, _, _ = self.assigner(
             pred_scores.detach().sigmoid(),
             bboxes_for_assigner.type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
@@ -1369,7 +1371,12 @@ class E2ELoss:
         # gain, target is 'mix' (o2o positive = 1, o2m-only anchors at a degree decaying 0.8 -> 0 over training),
         # branch weight follows the decaying one2many weight ('o2m' schedule)
         self.aux_fg = model.args.cls * 0.5 if hasattr(model.model[-1], "aux_fg") else 0.0
-        self.aux_fg_t = 0.8  # initial degree of the o2m-only ("ambiguous") anchors in the mix target
+        self.aux_fg_t = float(getattr(model.args, "aux_fg_t", 0.8))  # initial degree of the o2m-only anchors
+        self.aux_fg_decay = bool(getattr(model.args, "aux_fg_decay", True))  # False pins the degree all run
+        # Grade each term by its own assigned CIoU instead of a flat constant: t = iou ** gamma. gamma 0 is
+        # bit-exact the flat target, gamma 1 is v5's soft label; SMALLER gamma is HARDER. The assigner already
+        # computed this IoU for the alignment metric, so the grading costs nothing.
+        self.aux_fg_gamma = float(getattr(model.args, "aux_fg_target", 0.0))
         self.aux_fg_t_cur = self.aux_fg_t  # decayed across training by update()
 
     def __call__(self, preds: Any, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -1407,11 +1414,15 @@ class E2ELoss:
         Returns:
             (torch.Tensor): Scalar foreground auxiliary loss.
         """
-        o2m = self.one2many._cache["fg_mask"]  # dense one2many foreground
-        o2o = self.one2one._cache["fg_mask"]  # single one2one positive per GT
-        target = torch.maximum(o2o.float(), self.aux_fg_t_cur * o2m.float()).unsqueeze(1)  # (bs, 1, anchors)
+        o2m, o2o = self.one2many._cache, self.one2one._cache  # dense o2m assignment, single o2o positive per GT
+        g = self.aux_fg_gamma
+        # The mask is applied AFTER the power: 0.0 ** 0.0 == 1.0 would otherwise light up every background
+        # anchor. Powered in fp32 so a fractional exponent is not evaluated in half precision.
+        t_o2o = o2o["fg_mask"].float() if not g else o2o["iou"].float().pow(g) * o2o["fg_mask"]
+        t_o2m = o2m["fg_mask"].float() if not g else o2m["iou"].float().pow(g) * o2m["fg_mask"]
+        target = torch.maximum(t_o2o, self.aux_fg_t_cur * t_o2m).unsqueeze(1)  # (bs, 1, anchors)
         loss = F.binary_cross_entropy_with_logits(aux_pred.float(), target, reduction="none")
-        return loss.sum() / (o2m | o2o).sum().clamp(min=1)
+        return loss.sum() / (o2m["fg_mask"] | o2o["fg_mask"]).sum().clamp(min=1)
 
     def update(self) -> None:
         """Update the weights for one-to-many and one-to-one losses based on the decay schedule."""
@@ -1419,7 +1430,8 @@ class E2ELoss:
         self.o2m = self.decay(self.updates)
         self.o2o = max(self.total - self.o2m, 0)
         if self.aux_fg:  # slide the mix target from the dense o2m foreground toward pure o2o
-            self.aux_fg_t_cur = self.aux_fg_t * max(1 - self.updates / max(self.one2one.hyp.epochs - 1, 1), 0)
+            frac = max(1 - self.updates / max(self.one2one.hyp.epochs - 1, 1), 0) if self.aux_fg_decay else 1.0
+            self.aux_fg_t_cur = self.aux_fg_t * frac
 
     def decay(self, x) -> float:
         """Calculate the decayed weight for one-to-many loss based on the current update step."""

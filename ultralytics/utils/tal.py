@@ -78,6 +78,8 @@ class TaskAlignedAssigner(nn.Module):
             target_scores (torch.Tensor): Target scores with shape (bs, num_total_anchors, num_classes).
             fg_mask (torch.Tensor): Foreground mask with shape (bs, num_total_anchors).
             target_gt_idx (torch.Tensor): Target ground truth indices with shape (bs, num_total_anchors).
+            assigned_iou (torch.Tensor): CIoU of each anchor's own assigned box, 0 on background, shape
+                (bs, num_total_anchors). Already computed for the alignment metric, so it is free to return.
 
         References:
             https://github.com/Nioolek/PPYOLOE_pytorch/blob/master/ppyoloe/assigner/tal_assigner.py
@@ -89,6 +91,7 @@ class TaskAlignedAssigner(nn.Module):
                 torch.full_like(pd_scores[..., 0], self.num_classes),
                 torch.zeros_like(pd_bboxes),
                 torch.zeros_like(pd_scores),
+                torch.zeros_like(pd_scores[..., 0]),
                 torch.zeros_like(pd_scores[..., 0]),
                 torch.zeros_like(pd_scores[..., 0]),
             )
@@ -151,6 +154,8 @@ class TaskAlignedAssigner(nn.Module):
             target_scores (torch.Tensor): Target scores with shape (bs, num_total_anchors, num_classes).
             fg_mask (torch.Tensor): Foreground mask with shape (bs, num_total_anchors).
             target_gt_idx (torch.Tensor): Target ground truth indices with shape (bs, num_total_anchors).
+            assigned_iou (torch.Tensor): CIoU of each anchor's own assigned box, 0 on background, shape
+                (bs, num_total_anchors). Already computed for the alignment metric, so it is free to return.
         """
         mask_pos, align_metric, overlaps = self.get_pos_mask(
             pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt
@@ -172,7 +177,7 @@ class TaskAlignedAssigner(nn.Module):
         norm_align_metric = align_metric.amax(-2).unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
 
-        return target_labels, target_bboxes, target_scores, fg_mask.bool(), target_gt_idx
+        return target_labels, target_bboxes, target_scores, fg_mask.bool(), target_gt_idx, overlaps.amax(-2)
 
     def get_pos_mask(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt):
         """Get positive mask for each ground truth box.

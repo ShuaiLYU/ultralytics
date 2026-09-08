@@ -1366,10 +1366,10 @@ class E2ELoss:
         # final gain
         self.final_o2m = 0.1
         # yolo27 aux-fg recipe (hardcoded, architecture-owned via the head's aux_fg branch): gain is half the cls
-        # gain, target is 'mix' (o2o positive = 1, o2m-only anchors at a degree decaying 0.75 -> 0 over training),
+        # gain, target is 'mix' (o2o positive = 1, o2m-only anchors at a degree decaying 0.8 -> 0 over training),
         # branch weight follows the decaying one2many weight ('o2m' schedule)
         self.aux_fg = model.args.cls * 0.5 if hasattr(model.model[-1], "aux_fg") else 0.0
-        self.aux_fg_t = 0.75  # initial degree of the o2m-only ("ambiguous") anchors in the mix target
+        self.aux_fg_t = 0.8  # initial degree of the o2m-only ("ambiguous") anchors in the mix target
         self.aux_fg_t_cur = self.aux_fg_t  # decayed across training by update()
 
     def __call__(self, preds: Any, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:

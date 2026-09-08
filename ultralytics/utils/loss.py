@@ -391,6 +391,10 @@ class v8DetectionLoss:
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
+        # Exponent on the assigner's quality weight in the CLS target only: 1.0 = the alignment metric as-is
+        # (upstream), 0.0 = a flat one-hot. SMALLER is HARDER. Pairs with aux_fg_target, which moves the
+        # geometric signal onto the aux branch so cls need not carry it too.
+        self.cls_gamma = float(getattr(h, "cls_target", 1.0))
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
@@ -481,11 +485,21 @@ class v8DetectionLoss:
         # detached), read by E2ELoss's aux-fg target (yolo27).
         self._cache = {"fg_mask": fg_mask, "iou": assigned_iou}
 
+        # cls_gamma is applied HERE and not in the assigner on purpose: target_scores also weights the box and
+        # DFL losses through target_scores_sum, and those keep the original quality weighting so the change stays
+        # isolated to classification. The powered sum is the cls denominator, matching what cls is trained on.
+        cls_targets = (
+            target_scores
+            if self.cls_gamma == 1.0
+            else torch.where(target_scores > 0, target_scores.pow(self.cls_gamma), target_scores)
+        )
+        cls_targets_sum = max(cls_targets.sum(), 1)  # == target_scores_sum when cls_gamma == 1
+
         # Cls loss with optional class weighting
-        bce_loss = self.bce(pred_scores, target_scores.to(dtype))  # (bs, num_anchors, nc)
+        bce_loss = self.bce(pred_scores, cls_targets.to(dtype))  # (bs, num_anchors, nc)
         if self.class_weights is not None:
             bce_loss *= self.class_weights
-        loss[1] = bce_loss.sum() / target_scores_sum  # BCE
+        loss[1] = bce_loss.sum() / cls_targets_sum  # BCE
 
         # Bbox loss
         if fg_mask.sum():

@@ -48,7 +48,11 @@ SCORER_YAML_KEYS = {
 def collect_test_images(test_root: Path, n: int, seed: int = 0) -> list[tuple[str, str]]:
     """Return up to ``n`` (path, defect_type) pairs sampled across a category's test subdirs."""
     pairs = [
-        (str(p), sub.name) for sub in sorted(test_root.iterdir()) if sub.is_dir() for p in sorted(sub.glob("*.png"))
+        (str(p), sub.name)
+        for sub in sorted(test_root.iterdir())
+        if sub.is_dir()
+        for ext in ("*.png", "*.jpg", "*.jpeg")
+        for p in sorted(sub.glob(ext))
     ]
     random.Random(seed).shuffle(pairs)
     return pairs[:n] if n and n > 0 else pairs
@@ -151,14 +155,18 @@ def txt_to_mask(txt_path: str, h: int, w: int) -> np.ndarray | None:
     mask = np.zeros((h, w), dtype=np.uint8)
     for line in lines:
         parts = line.strip().split()
-        if len(parts) < 7:
-            continue
         coords = list(map(float, parts[1:]))
         if len(coords) % 2 != 0:
             continue
-        pts = [(int(coords[i] * w), int(coords[i + 1] * h)) for i in range(0, len(coords), 2)]
-        pts_array = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
-        cv2.fillPoly(mask, [pts_array], 255)
+        if len(coords) == 4:  # bbox: cx cy w h (normalized) -> filled rectangle
+            cx, cy, bw, bh = coords
+            x1, y1 = int((cx - bw / 2) * w), int((cy - bh / 2) * h)
+            x2, y2 = int((cx + bw / 2) * w), int((cy + bh / 2) * h)
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, thickness=-1)
+        elif len(coords) >= 6:  # seg polygon: >=3 (x, y) points
+            pts = [(int(coords[i] * w), int(coords[i + 1] * h)) for i in range(0, len(coords), 2)]
+            pts_array = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+            cv2.fillPoly(mask, [pts_array], 255)
     return mask
 
 
